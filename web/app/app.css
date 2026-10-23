@@ -71,7 +71,8 @@ canvas.screen { display: block; image-rendering: pixelated; image-rendering: cri
 #hcmd-form { padding: 4px 8px; border-top: 1px solid var(--line); font: 12px ui-monospace, monospace; color: #e88; }
 #hcmd { width: 70%; background: #000; color: #fff; border: 1px solid var(--line); font: inherit; padding: 2px 4px; }
 
-#kbd-capture { position: fixed; left: 0; bottom: 0; width: 1px; height: 1px; opacity: 0; border: 0; padding: 0; resize: none; pointer-events: none; }
+/* focusable (not display:none), 16px so iOS does not zoom on focus, at the top so focus does not scroll */
+#kbd-capture { position: fixed; left: 0; top: 0; width: 2em; height: 1.5em; font-size: 16px; opacity: 0; border: 0; padding: 0; margin: 0; resize: none; pointer-events: none; caret-color: transparent; color: transparent; background: transparent; z-index: -1; }
 
 dialog#about { max-width: min(640px, 94vw); background: var(--panel); color: var(--fg); border: 1px solid var(--line); border-radius: 8px; padding: 18px 22px; }
 dialog#about::backdrop { background: rgba(0,0,0,.6); }
@@ -102,3 +103,4 @@ dialog a { color: var(--accent); }
 .embed header { gap: 8px; padding: 2px 6px; flex-wrap: nowrap; }
 .embed #ipl-status { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
 .embed .attrib { font-size: 11px; padding: 2px 6px; }
+#loader-open.big a { display: inline-block; margin-top: 8px; padding: 12px 22px; font-size: 18px; border-radius: 8px; background: var(--accent); color: #000; text-decoration: none; font-weight: 600; }

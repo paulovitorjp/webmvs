@@ -174,7 +174,13 @@ function newView(t: Tab, ttype: string): TermView {
     return toConnection(raw);
   } });
   t.view = v;
-  v.canvas.addEventListener('pointerdown', () => focusTerminal(true));
+  // Soft keyboard: mobile browsers open it only for a focus() inside the tap's own gesture, and the
+  // compatibility mousedown that follows a tap moves the focus to <body> (keyboard slides down) unless
+  // it is cancelled. Mouse: focus on pointerdown. Touch/pen: focus on pointerup (the end of the tap).
+  v.canvas.addEventListener('mousedown', (e) => e.preventDefault());
+  v.canvas.addEventListener('pointerdown', (e) => { if (e.pointerType === 'mouse') focusTerminal(true); });
+  v.canvas.addEventListener('pointerup', (e) => { if (e.pointerType !== 'mouse') focusTerminal(true); });
+  v.canvas.addEventListener('click', () => { if (document.activeElement !== capture()) focusTerminal(true); });
   v.session.on('disconnect', () => dlog(`[${t.id}] disconnected`));
   v.session.on('connect', () => dlog(`[${t.id}] connected as ${ttype}`));
   return v;
@@ -221,12 +227,26 @@ document.addEventListener('keydown', (e) => {
   act(a);
 });
 // Soft keyboards (Android: keydown key === 'Unidentified') deliver text through input events.
+// The capture box keeps one placeholder character so a soft-keyboard backspace on an "empty" box still
+// produces an input event (deleteContentBackward); Enter arrives as insertLineBreak / a newline.
+const PAD_CHAR = ' ';
 function wireCapture(): void {
   const c = capture();
+  const resetBox = (): void => { c.value = PAD_CHAR; c.setSelectionRange(1, 1); };
+  resetBox();
+  c.addEventListener('focus', resetBox);
+  c.addEventListener('beforeinput', (e) => {
+    const t = e.inputType;
+    if (t === 'insertLineBreak' || t === 'insertParagraph') { e.preventDefault(); act({ kind: 'enter' }); resetBox(); }
+    else if (t === 'deleteContentBackward') { e.preventDefault(); act({ kind: 'backspace' }); resetBox(); }
+    else if (t === 'deleteContentForward') { e.preventDefault(); act({ kind: 'delete' }); resetBox(); }
+  });
   c.addEventListener('input', () => {
-    const s = c.value.replace(/\r?\n/g, '');
-    c.value = '';
-    if (s) act({ kind: 'type', text: s });
+    let s = c.value;
+    if (s.startsWith(PAD_CHAR)) s = s.slice(PAD_CHAR.length);
+    const parts = s.split(/\r?\n/);
+    resetBox();
+    parts.forEach((p, i) => { if (i > 0) act({ kind: 'enter' }); if (p) act({ kind: 'type', text: p }); });
   });
   document.addEventListener('paste', (e) => {
     const tgt = e.target as HTMLElement;
@@ -527,6 +547,16 @@ async function coiSettled(): Promise<boolean> {
 
 async function boot(): Promise<void> {
   await coiSettled();
+  if (BACKEND === 'wasm' && !self.crossOriginIsolated && EMBED) {
+    // Phones and most in-app browsers cannot isolate a page inside the post's frame (Document-Isolation-Policy
+    // is desktop Chrome/Edge 137+ only), but they can run the full site: offer that instead of an error.
+    $('loader-text').textContent = 'This browser cannot run MVS inside the post. It runs on the full site (phones too):';
+    $('loader-bar').parentElement!.hidden = true;
+    $('loader-open').classList.add('big');
+    $<HTMLAnchorElement>('loader-open').querySelector('a')!.textContent = 'Open webmvs.com';
+    (window as unknown as { mvsState: string }).mvsState = 'needs-full-site';
+    return;
+  }
   if (BACKEND === 'wasm' && !self.crossOriginIsolated) {
     throw new Error(EMBED ? 'this browser cannot run MVS inside the post (it needs desktop Chrome or Edge 137+). Open the full site instead'
       : 'this browser did not enable cross-origin isolation (SharedArrayBuffer is needed)');
