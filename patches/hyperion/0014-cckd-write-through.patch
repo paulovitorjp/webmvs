@@ -1,0 +1,64 @@
+diff --git a/cckddasd.c b/cckddasd.c
+index c279da31..29c9a34c 100644
+--- a/cckddasd.c
++++ b/cckddasd.c
+@@ -37,6 +37,35 @@ char*         compname   [] = { "none", "zlib", "bzip2" };
+ CCKD_L2ENT    empty_l2   [ CKD_NULLTRK_FMTMAX + 1 ][256] = {0};
+ CCKD64_L2ENT  empty64_l2 [ CKD_NULLTRK_FMTMAX + 1 ][256] = {0};
+ 
++#if defined( __EMSCRIPTEN__ )
++/* Write-through for the browser build.                               */
++/* 1 = at the end of every channel program that updated a track, the  */
++/* updated track images of the device are handed to the writer and    */
++/* the channel program ends only after they are in the (shadow) file. */
++/* Without it an updated track stays in the CCKD cache until the next */
++/* hardener / garbage collector pass, so a browser tab that is closed */
++/* or reloaded loses the last seconds of writes, and a close during a */
++/* flush leaves a random subset of them, not in MVS's write order     */
++/* ($HASP096 DISASTROUS ERROR in a JES2 checkpoint after such a       */
++/* close). With it a closed tab is like a power cut between two       */
++/* channel programs. Set by wasm_main --cckd-wrthru (persistent       */
++/* shadows on OPFS). Default 0 = upstream behaviour.                  */
++/* cckd_wasm_wrthru_skip: device numbers that keep the cached         */
++/* behaviour (wasm_main --cckd-wrthru-skip=, e.g. the page volume:    */
++/* its slots are not used again after an IPL).                        */
++DLL_EXPORT int cckd_wasm_wrthru = 0;
++DLL_EXPORT U16 cckd_wasm_wrthru_skip[ 8 ];
++DLL_EXPORT int cckd_wasm_wrthru_nskip = 0;
++static int cckd_wasm_wrthru_dev( DEVBLK* dev )
++{
++    int i;
++    if (!cckd_wasm_wrthru) return 0;
++    for (i = 0; i < cckd_wasm_wrthru_nskip && i < 8; i++)
++        if (cckd_wasm_wrthru_skip[i] == dev->devnum) return 0;
++    return 1;
++}
++#endif
++
+ DLL_EXPORT int gctab[5] =   /* Garbage Collection parameters */
+ {
+     4096,                   /* critical  50%   - 100%    */
+@@ -552,6 +581,23 @@ CCKD_EXT       *cckd;                   /* -> cckd extension         */
+         cache_unlock (CACHE_DEVBUF);
+     }
+ 
++#if defined( __EMSCRIPTEN__ )
++    /* Write-through (see cckd_wasm_wrthru): write this device's updated */
++    /* tracks now and wait until the writer has written them.            */
++    if (cckd->updated && !cckd->merging && !cckd->stopping && cckd_wasm_wrthru_dev( dev ))
++    {
++        cckd_flush_cache (dev);
++        while (cckd->wrpending)
++        {
++            cckd->cckdwaiters++;
++            wait_condition (&cckd->cckdiocond, &cckd->cckdiolock);
++            cckd->cckdwaiters--;
++        }
++        if (cckd->cckdwaiters)
++            broadcast_condition (&cckd->cckdiocond);
++    }
++    else
++#endif
+     /* Cause writers to start after first update */
+     if (cckd->updated && (cckdblk.wrs == 0 || cckd->cckdwaiters != 0))
+         cckd_flush_cache (dev);

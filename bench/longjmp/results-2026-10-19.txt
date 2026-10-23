@@ -1,0 +1,151 @@
+# ~/webmvs/logs/longjmp-build.log (excerpt)
+emcc (Emscripten gcc/clang-like replacement + linker emulating GNU ld) 6.0.13 (e13ee988ce3d87a738dd8f3661d02223308c412a)
+gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0
+== wasm-eh-legacy: emcc -O3 -sENVIRONMENT=web,node -sMIN_NODE_VERSION=181900 -sEXIT_RUNTIME=1 -fwasm-exceptions -sSUPPORT_LONGJMP=wasm
+-rwxrwxr-x 1 ubuntu ubuntu 20071 Oct 19 23:44 out/wasm-eh-legacy.wasm
+== wasm-eh-exnref: emcc -O3 -sENVIRONMENT=web,node -sMIN_NODE_VERSION=181900 -sEXIT_RUNTIME=1 -fwasm-exceptions -sSUPPORT_LONGJMP=wasm -sWASM_LEGACY_EXCEPTIONS=0
+emcc: warning: MIN_NODE_VERSION=181900 is not compatible with Wasm exceptions (-fwasm-exceptions with -sWASM_LEGACY_EXCEPTIONS=0) (MIN_NODE_VERSION=241500 or above required) [-Wcompatibility]
+-rwxrwxr-x 1 ubuntu ubuntu 20082 Oct 19 23:44 out/wasm-eh-exnref.wasm
+== sjlj-wasm-noeh: emcc -O3 -sENVIRONMENT=web,node -sMIN_NODE_VERSION=181900 -sEXIT_RUNTIME=1 -sSUPPORT_LONGJMP=wasm
+-rwxrwxr-x 1 ubuntu ubuntu 20062 Oct 19 23:44 out/sjlj-wasm-noeh.wasm
+== js-sjlj: emcc -O3 -sENVIRONMENT=web,node -sMIN_NODE_VERSION=181900 -sEXIT_RUNTIME=1 -sSUPPORT_LONGJMP=emscripten
+-rwxrwxr-x 1 ubuntu ubuntu 20166 Oct 19 23:44 out/js-sjlj.wasm
+== wasm-eh-legacy opcodes:
+      1 (catch
+      2 (throw
+      1 (try
+== wasm-eh-legacy imports:
+ (import "a" "a" (func $fimport$0 (type $10) (param i32 i32 i32 i32) (result i32)))
+ (import "a" "b" (func $fimport$1 (type $0) (param i32) (result i32)))
+ (import "a" "c" (func $fimport$2 (type $11) (param i32 i64 i32) (result i32)))
+ (import "a" "d" (func $fimport$3 (type $2) (param i32)))
+== wasm-eh-exnref opcodes:
+      1 (catch
+      2 (throw
+      1 (try_table
+== wasm-eh-exnref imports:
+ (import "a" "a" (func $fimport$0 (type $10) (param i32 i32 i32 i32) (result i32)))
+ (import "a" "b" (func $fimport$1 (type $0) (param i32) (result i32)))
+ (import "a" "c" (func $fimport$2 (type $11) (param i32 i64 i32) (result i32)))
+ (import "a" "d" (func $fimport$3 (type $2) (param i32)))
+== sjlj-wasm-noeh opcodes:
+      1 (catch
+      2 (throw
+      1 (try
+== sjlj-wasm-noeh imports:
+ (import "a" "a" (func $fimport$0 (type $10) (param i32 i32 i32 i32) (result i32)))
+ (import "a" "b" (func $fimport$1 (type $0) (param i32) (result i32)))
+ (import "a" "c" (func $fimport$2 (type $11) (param i32 i64 i32) (result i32)))
+ (import "a" "d" (func $fimport$3 (type $2) (param i32)))
+== js-sjlj opcodes:
+== js-sjlj imports:
+ (import "a" "a" (func $fimport$0 (type $10) (param i32 i32 i32 i32) (result i32)))
+ (import "a" "b" (func $fimport$1 (type $6)))
+ (import "a" "c" (func $fimport$2 (type $0) (param i32) (result i32)))
+ (import "a" "d" (func $fimport$3 (type $11) (param i32 i64 i32) (result i32)))
+ (import "a" "e" (func $fimport$4 (type $4) (param i32 i32 i32)))
+ (import "a" "f" (func $fimport$5 (type $3) (param i32)))
+
+# ~/webmvs/logs/longjmp-bench.log (RESULT lines, run.sh 10000000 5, R_DIRECT=3)
+== host: 16 cpus, load: 1.22 0.83 0.55, affinity: 12-15
+== native (gcc -O3)
+native | RESULT test=jmp1 n=10000000 longjmps=10000000 reps=5 min_ns_per=8.12 median_ns_per=8.17 max_ns_per=8.32 min_total_ms=81.2
+native | RESULT test=nojmp n=10000000 longjmps=0 reps=5 min_ns_per=1.85 median_ns_per=1.86 max_ns_per=1.87 min_total_ms=18.5
+native | RESULT test=jmp256 n=10000000 longjmps=39062 reps=5 min_ns_per=1.95 median_ns_per=2.05 max_ns_per=2.06 min_total_ms=19.5
+rc=0
+== node /usr/bin/node v18.19.1 (V8 10.2.154.26-node.28)
+nodev18.19.1 wasm-eh-legacy | RESULT test=jmp1 n=10000000 longjmps=10000000 reps=5 min_ns_per=4918.06 median_ns_per=5238.67 max_ns_per=6298.87 min_total_ms=49180.6
+nodev18.19.1 wasm-eh-legacy | RESULT test=nojmp n=10000000 longjmps=0 reps=5 min_ns_per=11.46 median_ns_per=11.46 max_ns_per=11.49 min_total_ms=114.6
+nodev18.19.1 wasm-eh-legacy | RESULT test=jmp256 n=10000000 longjmps=39062 reps=5 min_ns_per=33.23 median_ns_per=34.08 max_ns_per=35.10 min_total_ms=332.3
+rc=0
+nodev18.19.1 wasm-eh-exnref | failed to asynchronously prepare wasm: CompileError: WebAssembly.instantiate(): Compiling function #8 failed: Invalid opcode 0x1f @+957
+nodev18.19.1 wasm-eh-exnref | Aborted(CompileError: WebAssembly.instantiate(): Compiling function #8 failed: Invalid opcode 0x1f @+957)
+nodev18.19.1 wasm-eh-exnref | RuntimeError: Aborted(CompileError: WebAssembly.instantiate(): Compiling function #8 failed: Invalid opcode 0x1f @+957). Build with -sASSERTIONS for more info.
+rc=1
+nodev18.19.1 sjlj-wasm-noeh | RESULT test=jmp1 n=10000000 longjmps=10000000 reps=5 min_ns_per=4995.36 median_ns_per=5389.41 max_ns_per=6290.18 min_total_ms=49953.6
+nodev18.19.1 sjlj-wasm-noeh | RESULT test=nojmp n=10000000 longjmps=0 reps=5 min_ns_per=11.39 median_ns_per=11.40 max_ns_per=11.42 min_total_ms=113.9
+nodev18.19.1 sjlj-wasm-noeh | RESULT test=jmp256 n=10000000 longjmps=39062 reps=5 min_ns_per=32.20 median_ns_per=32.95 max_ns_per=33.23 min_total_ms=322.0
+rc=0
+nodev18.19.1 js-sjlj | RESULT test=jmp1 n=10000000 longjmps=10000000 reps=5 min_ns_per=1199.69 median_ns_per=1204.54 max_ns_per=1215.88 min_total_ms=11996.9
+nodev18.19.1 js-sjlj | RESULT test=nojmp n=10000000 longjmps=0 reps=5 min_ns_per=20.04 median_ns_per=20.08 max_ns_per=20.28 min_total_ms=200.4
+nodev18.19.1 js-sjlj | RESULT test=jmp256 n=10000000 longjmps=39062 reps=5 min_ns_per=24.91 median_ns_per=24.99 max_ns_per=25.14 min_total_ms=249.1
+rc=0
+== node ~/emsdk/node/24.19.0_64bit/bin/node v24.19.0 (V8 13.6.233.17-node.51)
+nodev24.19.0 wasm-eh-legacy | RESULT test=jmp1 n=10000000 longjmps=10000000 reps=5 min_ns_per=170.36 median_ns_per=170.47 max_ns_per=170.89 min_total_ms=1703.6
+nodev24.19.0 wasm-eh-legacy | RESULT test=nojmp n=10000000 longjmps=0 reps=5 min_ns_per=11.80 median_ns_per=11.80 max_ns_per=11.84 min_total_ms=118.0
+nodev24.19.0 wasm-eh-legacy | RESULT test=jmp256 n=10000000 longjmps=39062 reps=5 min_ns_per=12.49 median_ns_per=12.51 max_ns_per=12.56 min_total_ms=124.9
+rc=0
+nodev24.19.0 wasm-eh-exnref | RESULT test=jmp1 n=10000000 longjmps=10000000 reps=5 min_ns_per=171.04 median_ns_per=171.12 max_ns_per=171.39 min_total_ms=1710.4
+nodev24.19.0 wasm-eh-exnref | RESULT test=nojmp n=10000000 longjmps=0 reps=5 min_ns_per=11.77 median_ns_per=11.79 max_ns_per=11.82 min_total_ms=117.7
+nodev24.19.0 wasm-eh-exnref | RESULT test=jmp256 n=10000000 longjmps=39062 reps=5 min_ns_per=12.47 median_ns_per=12.50 max_ns_per=12.52 min_total_ms=124.7
+rc=0
+nodev24.19.0 sjlj-wasm-noeh | RESULT test=jmp1 n=10000000 longjmps=10000000 reps=5 min_ns_per=175.88 median_ns_per=176.30 max_ns_per=176.60 min_total_ms=1758.8
+nodev24.19.0 sjlj-wasm-noeh | RESULT test=nojmp n=10000000 longjmps=0 reps=5 min_ns_per=11.76 median_ns_per=11.77 max_ns_per=11.80 min_total_ms=117.6
+nodev24.19.0 sjlj-wasm-noeh | RESULT test=jmp256 n=10000000 longjmps=39062 reps=5 min_ns_per=12.46 median_ns_per=12.65 max_ns_per=13.96 min_total_ms=124.6
+rc=0
+nodev24.19.0 js-sjlj | RESULT test=jmp1 n=10000000 longjmps=10000000 reps=5 min_ns_per=398.30 median_ns_per=400.06 max_ns_per=401.10 min_total_ms=3983.0
+nodev24.19.0 js-sjlj | RESULT test=nojmp n=10000000 longjmps=0 reps=5 min_ns_per=20.43 median_ns_per=20.46 max_ns_per=20.51 min_total_ms=204.3
+nodev24.19.0 js-sjlj | RESULT test=jmp256 n=10000000 longjmps=39062 reps=5 min_ns_per=22.20 median_ns_per=22.23 max_ns_per=22.34 min_total_ms=222.0
+rc=0
+== browsers
+BROWSER chromium 141.0.7390.37
+chromium wasm-eh-legacy | RESULT test=jmp1 n=10000000 longjmps=10000000 reps=5 min_ns_per=117.34 median_ns_per=117.43 max_ns_per=117.84 min_total_ms=1173.4
+chromium wasm-eh-legacy | RESULT test=nojmp n=10000000 longjmps=0 reps=5 min_ns_per=12.68 median_ns_per=12.70 max_ns_per=12.73 min_total_ms=126.8
+chromium wasm-eh-legacy | RESULT test=jmp256 n=10000000 longjmps=39062 reps=5 min_ns_per=13.13 median_ns_per=13.16 max_ns_per=13.22 min_total_ms=131.3
+chromium wasm-eh-exnref | RESULT test=jmp1 n=10000000 longjmps=10000000 reps=5 min_ns_per=117.39 median_ns_per=117.77 max_ns_per=126.91 min_total_ms=1173.9
+chromium wasm-eh-exnref | RESULT test=nojmp n=10000000 longjmps=0 reps=5 min_ns_per=12.67 median_ns_per=12.68 max_ns_per=12.73 min_total_ms=126.7
+chromium wasm-eh-exnref | RESULT test=jmp256 n=10000000 longjmps=39062 reps=5 min_ns_per=13.13 median_ns_per=13.16 max_ns_per=13.21 min_total_ms=131.3
+chromium sjlj-wasm-noeh | RESULT test=jmp1 n=10000000 longjmps=10000000 reps=5 min_ns_per=117.28 median_ns_per=117.35 max_ns_per=117.86 min_total_ms=1172.8
+chromium sjlj-wasm-noeh | RESULT test=nojmp n=10000000 longjmps=0 reps=5 min_ns_per=12.66 median_ns_per=12.67 max_ns_per=12.69 min_total_ms=126.6
+chromium sjlj-wasm-noeh | RESULT test=jmp256 n=10000000 longjmps=39062 reps=5 min_ns_per=13.11 median_ns_per=13.16 max_ns_per=13.19 min_total_ms=131.1
+chromium js-sjlj | RESULT test=jmp1 n=10000000 longjmps=10000000 reps=5 min_ns_per=235.58 median_ns_per=235.68 max_ns_per=235.84 min_total_ms=2355.8
+chromium js-sjlj | RESULT test=nojmp n=10000000 longjmps=0 reps=5 min_ns_per=23.34 median_ns_per=23.37 max_ns_per=23.42 min_total_ms=233.4
+chromium js-sjlj | RESULT test=jmp256 n=10000000 longjmps=39062 reps=5 min_ns_per=24.34 median_ns_per=24.37 max_ns_per=24.43 min_total_ms=243.4
+BROWSER firefox 142.0.1
+firefox wasm-eh-legacy | RESULT test=jmp1 n=10000000 longjmps=10000000 reps=5 min_ns_per=4469.80 median_ns_per=4510.10 max_ns_per=4534.60 min_total_ms=44698.0
+firefox wasm-eh-legacy | RESULT test=nojmp n=10000000 longjmps=0 reps=5 min_ns_per=24.30 median_ns_per=25.20 max_ns_per=27.50 min_total_ms=243.0
+firefox wasm-eh-legacy | RESULT test=jmp256 n=10000000 longjmps=39062 reps=5 min_ns_per=45.80 median_ns_per=46.10 max_ns_per=51.90 min_total_ms=458.0
+firefox wasm-eh-legacy | [JavaScript Warning: "The WebAssembly exception handling 'try' instruction is deprecated and should no longer be used. Please recompile to use the 'try_table' instruction instead."]
+firefox wasm-eh-exnref | RESULT test=jmp1 n=10000000 longjmps=10000000 reps=5 min_ns_per=4544.00 median_ns_per=4548.20 max_ns_per=4730.60 min_total_ms=45440.0
+firefox wasm-eh-exnref | RESULT test=nojmp n=10000000 longjmps=0 reps=5 min_ns_per=25.90 median_ns_per=26.30 max_ns_per=27.30 min_total_ms=259.0
+firefox wasm-eh-exnref | RESULT test=jmp256 n=10000000 longjmps=39062 reps=5 min_ns_per=48.20 median_ns_per=48.30 max_ns_per=48.40 min_total_ms=482.0
+firefox sjlj-wasm-noeh | RESULT test=jmp1 n=10000000 longjmps=10000000 reps=5 min_ns_per=4477.20 median_ns_per=4501.30 max_ns_per=4763.30 min_total_ms=44772.0
+firefox sjlj-wasm-noeh | RESULT test=nojmp n=10000000 longjmps=0 reps=5 min_ns_per=24.30 median_ns_per=25.10 max_ns_per=25.30 min_total_ms=243.0
+firefox sjlj-wasm-noeh | RESULT test=jmp256 n=10000000 longjmps=39062 reps=5 min_ns_per=45.70 median_ns_per=46.00 max_ns_per=49.70 min_total_ms=457.0
+firefox js-sjlj | RESULT test=jmp1 n=10000000 longjmps=10000000 reps=5 min_ns_per=3584.00 median_ns_per=3597.60 max_ns_per=3622.20 min_total_ms=35840.0
+firefox js-sjlj | RESULT test=nojmp n=10000000 longjmps=0 reps=5 min_ns_per=35.50 median_ns_per=35.60 max_ns_per=35.70 min_total_ms=355.0
+firefox js-sjlj | RESULT test=jmp256 n=10000000 longjmps=39062 reps=5 min_ns_per=77.40 median_ns_per=78.10 max_ns_per=80.40 min_total_ms=774.0
+rc=0
+== browsers, direct (no Playwright)
+direct-chromium wasm-eh-legacy | RESULT test=jmp1 n=10000000 longjmps=10000000 reps=3 min_ns_per=117.24 median_ns_per=117.27 max_ns_per=117.36 min_total_ms=1172.4
+direct-chromium wasm-eh-legacy | RESULT test=nojmp n=10000000 longjmps=0 reps=3 min_ns_per=12.70 median_ns_per=12.72 max_ns_per=12.73 min_total_ms=127.0
+direct-chromium wasm-eh-legacy | RESULT test=jmp256 n=10000000 longjmps=39062 reps=3 min_ns_per=13.16 median_ns_per=13.20 max_ns_per=13.21 min_total_ms=131.6
+direct-chromium wasm-eh-exnref | RESULT test=jmp1 n=10000000 longjmps=10000000 reps=3 min_ns_per=140.54 median_ns_per=170.25 max_ns_per=187.71 min_total_ms=1405.4
+direct-chromium wasm-eh-exnref | RESULT test=nojmp n=10000000 longjmps=0 reps=3 min_ns_per=12.80 median_ns_per=12.81 max_ns_per=13.42 min_total_ms=128.0
+direct-chromium wasm-eh-exnref | RESULT test=jmp256 n=10000000 longjmps=39062 reps=3 min_ns_per=13.44 median_ns_per=13.80 max_ns_per=14.05 min_total_ms=134.4
+direct-chromium sjlj-wasm-noeh | RESULT test=jmp1 n=10000000 longjmps=10000000 reps=3 min_ns_per=118.20 median_ns_per=118.35 max_ns_per=118.57 min_total_ms=1182.0
+direct-chromium sjlj-wasm-noeh | RESULT test=nojmp n=10000000 longjmps=0 reps=3 min_ns_per=12.69 median_ns_per=12.70 max_ns_per=12.70 min_total_ms=126.9
+direct-chromium sjlj-wasm-noeh | RESULT test=jmp256 n=10000000 longjmps=39062 reps=3 min_ns_per=13.16 median_ns_per=13.21 max_ns_per=13.21 min_total_ms=131.6
+direct-chromium js-sjlj | RESULT test=jmp1 n=10000000 longjmps=10000000 reps=3 min_ns_per=236.81 median_ns_per=237.11 max_ns_per=237.71 min_total_ms=2368.1
+direct-chromium js-sjlj | RESULT test=nojmp n=10000000 longjmps=0 reps=3 min_ns_per=23.03 median_ns_per=23.08 max_ns_per=23.08 min_total_ms=230.3
+direct-chromium js-sjlj | RESULT test=jmp256 n=10000000 longjmps=39062 reps=3 min_ns_per=24.09 median_ns_per=24.11 max_ns_per=24.16 min_total_ms=240.9
+direct-firefox wasm-eh-legacy | RESULT test=jmp1 n=10000000 longjmps=10000000 reps=3 min_ns_per=4463.10 median_ns_per=4479.70 max_ns_per=4485.80 min_total_ms=44631.0
+direct-firefox wasm-eh-legacy | RESULT test=nojmp n=10000000 longjmps=0 reps=3 min_ns_per=25.20 median_ns_per=25.50 max_ns_per=25.70 min_total_ms=252.0
+direct-firefox wasm-eh-legacy | RESULT test=jmp256 n=10000000 longjmps=39062 reps=3 min_ns_per=45.50 median_ns_per=45.60 max_ns_per=48.00 min_total_ms=455.0
+direct-firefox wasm-eh-exnref | RESULT test=jmp1 n=10000000 longjmps=10000000 reps=3 min_ns_per=4502.70 median_ns_per=4515.00 max_ns_per=4565.40 min_total_ms=45027.0
+direct-firefox wasm-eh-exnref | RESULT test=nojmp n=10000000 longjmps=0 reps=3 min_ns_per=25.00 median_ns_per=25.30 max_ns_per=25.60 min_total_ms=250.0
+direct-firefox wasm-eh-exnref | RESULT test=jmp256 n=10000000 longjmps=39062 reps=3 min_ns_per=46.30 median_ns_per=47.10 max_ns_per=48.80 min_total_ms=463.0
+direct-firefox sjlj-wasm-noeh | RESULT test=jmp1 n=10000000 longjmps=10000000 reps=3 min_ns_per=4442.60 median_ns_per=4453.40 max_ns_per=4457.50 min_total_ms=44426.0
+direct-firefox sjlj-wasm-noeh | RESULT test=nojmp n=10000000 longjmps=0 reps=3 min_ns_per=25.30 median_ns_per=25.50 max_ns_per=25.50 min_total_ms=253.0
+direct-firefox sjlj-wasm-noeh | RESULT test=jmp256 n=10000000 longjmps=39062 reps=3 min_ns_per=45.80 median_ns_per=46.00 max_ns_per=46.40 min_total_ms=458.0
+direct-firefox js-sjlj | RESULT test=jmp1 n=10000000 longjmps=10000000 reps=3 min_ns_per=3598.30 median_ns_per=3601.30 max_ns_per=3659.40 min_total_ms=35983.0
+direct-firefox js-sjlj | RESULT test=nojmp n=10000000 longjmps=0 reps=3 min_ns_per=43.70 median_ns_per=44.70 max_ns_per=52.00 min_total_ms=437.0
+direct-firefox js-sjlj | RESULT test=jmp256 n=10000000 longjmps=39062 reps=3 min_ns_per=80.00 median_ns_per=80.30 max_ns_per=83.50 min_total_ms=800.0
+rc=0
+# load at end: 0.00 0.47 1.09 2/471 289251
+e04ab424f3ba8bc52c3c01a8fde976496caf9560b41fa47e1984c2e7a54a72ef  longjmp_bench.c
+7524d0d820fd288fdbed5d41c42001f4f84672c44eefce7f7e34e11ce7667107  out/js-sjlj.wasm
+a573e673d9c5d7ee9df56ea34053b50e2ec57aa9c0d0c4f669b27347c1c7eb4c  out/sjlj-wasm-noeh.wasm
+76dd9794f922dec7e74fa01eb6de0983a2571b4376fd15082782aa71dc4c2b1c  out/wasm-eh-exnref.wasm
+a88d582042f8bc7cb818d65eca76bf6e6d643539f5b29505648af5e0da63ec7d  out/wasm-eh-legacy.wasm
+	

@@ -1,0 +1,169 @@
+# MVS 3.8J in the browser
+
+IBM MVS 3.8J (MVS/CE) runs on the SDL Hercules Hyperion mainframe emulator, compiled to WebAssembly.
+Everything runs in your browser tab: no server-side emulator, no websocket proxy. The web server only
+serves static files.
+
+Runs MVS/CE by Philip Young (https://github.com/MVS-sysgen/sysgen), based on Jay Moseley's MVS 3.8j sysgen
+(http://www.jaymoseley.com/hercules/). Emulation by Hercules Hyperion.
+
+You see the IPL on the MVS master console (Console tab), then you log on to TSO in a 3270 terminal
+(TSO tab). TSO user `MVSCE02`, password `PASS4U` (the public MVS/CE defaults).
+
+**Live demo:** https://webmvs.com
+
+![TSO in the browser](docs/img/tso-chromium.png)
+
+## What it does
+- About 4 MB of disk data loads before the IPL; the rest of the disks (59 MB in 597 small chunk files) loads only when MVS reads it. A second visit uses the
+  browser cache. Measured (headless Playwright on the build host, cold visit, the test logs
+  on after the 1.5 s tab switch): TSO READY 9.4-9.9 s after the page opens in Chromium (WebKit 8.7-9.4 s); with a
+  9 Mbit/s link and 60 ms latency 13.4-13.7 s.
+- Firefox: the slow Firefox times in the test reports (TSO READY 16-17 s, IKT007I 10-12 s) are from **Playwright's
+  own patched Firefox build** (142.0.1, `firefox-1495`), which runs WebAssembly about 5 times slower than the
+  official Mozilla build of the same version (measured with a plain integer loop, with and without Playwright
+  attached). Official Firefox 142.0.1 and 158.0.1 (`scripts/realff.sh`, same host): IKT007I 4.5-4.9 s after the page
+  opens (Chromium 3.8-4.0 s), and the CPU-bound benchmark job ran faster than in Chromium (GO step 14.2-15.5 s against 21.7 s).
+  Not known: why the Playwright build is slow; the full time to TSO READY in an official Firefox (Playwright can not
+  drive it); Firefox on other machines.
+- Console tab: the real MVS master console (3270 at device 0010). You can type operator commands
+  (for example `D A,L`).
+- TSO tab: TSO on 3270 terminals 0400-0403. `+` opens one more TSO session.
+- Your disks are saved in your browser (OPFS). A data set member that you save is still there after a reload.
+  Use **Shut down** before you close the tab; **Reset machine** goes back to the original disks.
+- `?debug=1` shows the Hercules log and command line. `?persist=0` starts a fresh machine at every load.
+
+Supported: current desktop Chrome/Edge, Firefox, Safari (tested with Playwright Chromium, Firefox and
+WebKit). The wasm memory is 112 MiB; the browser processes use up to about 1 GB in Firefox and WebKit.
+
+## How it works
+```
+ Browser tab (cross-origin isolated: COOP/COEP headers, or coi-serviceworker on GitHub Pages)
+ +-----------------------------------------------------------------------------------------+
+ | Main thread (page)                                                                      |
+ |   web/app: loader, tabs, keyboard          athornton/tn3270 (3270 data stream, canvas)  |
+ |   web/runtime/mvs-runtime.js  --- raw TN3270 bytes --->  one terminal per tab           |
+ |        |  SharedArrayBuffer byte rings + futex doorbell (no sockets, no network)        |
+ +--------|--------------------------------------------------------------------------------+
+ | Web workers (Emscripten pthreads, one wasm32 memory)                                    |
+ |   hercules.wasm = SDL Hyperion 4.9.1 + patches/hyperion/*.patch + src/wasm/*            |
+ |     wasm_main.c    starts Hercules without a panel (herclin model), hidden commands     |
+ |     wasmsock.c     vsock_* calls: console.c's TN3270 server talks to the page's rings   |
+ |     CPU thread (S/370, NUMCPU 1)  device threads  CCKD DASD                             |
+ |     lazydasd.cpp   WasmFS backend: track chunk -> fetch() in the worker -> Cache API    |
+ |     shadow files   CCKD sf= files on OPFS (your changes; base volumes stay read-only)   |
+ +-----------------------------------------------------------------------------------------+
+        | HTTP GET of whole files (no Range needed)
+ Static host (GitHub Pages / Cloudflare Pages / any web server)
+   index.html app.js runtime/hercules.{js,wasm} conf/ boot/ dasd/manifest.json dasd/c/<sha256>
+```
+- The DASD volumes are the MVS/CE v3.0.0 release volumes, compressed CCKD, split into content-addressed
+  chunk files. A boot list (recorded track traces of real IPLs, `dasd/manifest/`) selects the chunks that are fetched before the IPL.
+- The page answers the NIP prompt on the console like an operator, sets roll mode, and switches to the
+  TSO tab when `IKT007I` (TSO ready) shows.
+- Design, decisions and measured results: [docs/RESEARCH.md](docs/RESEARCH.md) and [docs/DEPLOY.md](docs/DEPLOY.md).
+
+## Repository layout
+```
+patches/hyperion/   changes to SDL Hyperion, as separate patch files (QPL 1.0 section 3)
+src/wasm/           new C/C++/JS files linked into hercules.wasm
+conf/               Hercules configuration and rc files (web and native)
+web/app/            the visitor page (TypeScript, esbuild)
+web/runtime/        the runtime module that loads and drives hercules.wasm
+web/vendor/         vendored athornton/tn3270 and coi-serviceworker (pinned, not modified)
+scripts/            host setup, build, DASD chunking, bundle, tests
+dasd/manifest/      boot track lists (the DASD images themselves are not in git)
+bench/              micro benchmarks (longjmp, wasm exceptions)
+docs/               research, deploy guide, pinned versions
+LICENSES/           Hercules QPL 1.0 and copyright notice
+LICENSE NOTICE      Apache-2.0 license of the project code, third-party notices
+```
+
+## Build
+The build runs on an x86_64 Ubuntu 24.04 host (a VM or any other machine; 4 or more cores,
+8 GB RAM and 20 GB disk are enough). The scripts expect the repository at `~/webmvs`.
+All versions are pinned in [docs/PINS.md](docs/PINS.md).
+
+1. Host packages and emsdk 6.0.13 (pinned; do not use `latest`):
+   ```
+   git clone https://github.com/paulovitorjp/webmvs ~/webmvs && cd ~/webmvs
+   scripts/host-setup.sh
+   git clone https://github.com/emscripten-core/emsdk ~/emsdk
+   (cd ~/emsdk && ./emsdk install 6.0.13 && ./emsdk activate 6.0.13)
+   ```
+2. Hyperion source (pinned commit `ee86c4d`, tag `Release_4.9.1`) and a native reference build
+   (this also clones `~/src/hyperion`, which the wasm build copies):
+   ```
+   scripts/build-native.sh
+   ```
+3. MVS/CE v3.0.0 release (downloaded from GitHub, sha256 checked):
+   ```
+   scripts/get-mvsce.sh
+   ```
+4. The browser build (outputs in `~/build/webmvs`; set `B=` for another dir):
+   ```
+   scripts/build.sh ext       # Hyperion extpkgs (crypto, decNumber, SoftFloat, telnet) for wasm32
+   scripts/build.sh build     # patches + emconfigure + make -> hercules.js / hercules.wasm
+   scripts/build.sh chunks    # lazy DASD chunks + manifest from the MVS/CE volumes (boot traces: dasd/manifest/)
+   scripts/build.sh seed      # seed shadow file (SMF off)
+   ```
+5. The deployable site (`dist/` in the repo, with content-hashed file names, `_headers`, `.nojekyll` and
+   `404.html`; `--tar` also writes `dist-<build>.tar.gz` + `.sha256` for a GitHub Release; see `docs/DEPLOY.md`):
+   ```
+   scripts/bundle.sh --tar
+   ```
+6. Serve it locally (127.0.0.1 only) like the two hosts: `node scripts/pages-emu.mjs --root dist --port 8402 --profile cloudflare`
+   (headers from `_headers`) or `--profile github` (no headers: coi-serviceworker), then open `http://localhost:<port>/`.
+
+7. Deploy to Cloudflare Pages (the live site; details in [docs/DEPLOY.md](docs/DEPLOY.md), section 4):
+   ```
+   npx wrangler@4 login                                              # or set CLOUDFLARE_API_TOKEN
+   npx wrangler@4 pages project create webmvs --production-branch main   # once
+   npx wrangler@4 pages deploy dist --project-name webmvs --branch main
+   ```
+
+The bundle is a plain static site. Host it on any server that sets
+`Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: require-corp`
+(the bundle has a `_headers` file for Cloudflare Pages / Netlify). On a host without custom headers
+(GitHub Pages) `coi-serviceworker.js` makes the page cross-origin isolated; the first visit reloads once.
+
+## License
+The code of this project (the runtime C/C++ in `src/wasm/`, the page and runtime JS/TS in `web/app/` and
+`web/runtime/`, `scripts/`, `conf/` except `conf/mvsce-stock/`, and `docs/`) is licensed under the
+[Apache License, Version 2.0](LICENSE). Copyright 2026 Paulo Pereira and the webmvs authors. The source files have the
+line `SPDX-License-Identifier: Apache-2.0`. See [NOTICE](NOTICE) for the third-party notices.
+
+These parts are NOT under the Apache License and keep their own licenses:
+- the Hercules patches in `patches/hyperion/`: Q Public License 1.0 (the Hercules license,
+  [LICENSES/hercules-QPL-1.0.html](LICENSES/hercules-QPL-1.0.html));
+- vendored code: `web/vendor/tn3270/` (MIT), `web/vendor/coi-serviceworker/` (MIT), the 3270 font (BSD-style);
+- MVS 3.8J is public domain; the MVS/CE add-ons keep their own terms.
+
+Each bundle has `LICENSE`, `NOTICE` and the QPL text in its `source/` folder (and `licenses/`, `SOURCE.txt`).
+
+## Credits and licenses
+| Component | License | Notes |
+|---|---|---|
+| [SDL Hercules 4.x Hyperion](https://github.com/SDL-Hercules-390/hyperion) (Roger Bowler, Jan Jaeger, Jay Maynard and others) | [Q Public License 1.0](LICENSES/hercules-QPL-1.0.html) | see below |
+| Hercules extpkgs crypto, decNumber, SoftFloat, telnet | their own licenses (copied into the bundle `licenses/`) | built unmodified at pinned commits |
+| MVS 3.8J (IBM) | public domain | |
+| [MVS/CE](https://github.com/MVS-sysgen/sysgen) v3.0.0 (MVS-sysgen project) | see its repository | the DASD volumes are built from its release; the sysgen automates Jay Moseley's procedures |
+| [Jay Moseley's MVS 3.8J sysgen](https://www.jaymoseley.com/hercules/) | | the basis of MVS/CE |
+| [athornton/tn3270](https://github.com/athornton/tn3270) (Adam Thornton) | MIT | `web/vendor/tn3270/LICENSE` |
+| 3270 font (x3270 BDF font, Paul Mattes, Jeff Sparkes, GTRC) | BSD-style | `web/vendor/tn3270/packages/canvas/assets/LICENSE-3270-font.txt`; see also [rbanffy/3270font](https://github.com/rbanffy/3270font) |
+| [coi-serviceworker](https://github.com/gzuidhof/coi-serviceworker) (Guido Zuidhof) | MIT | `web/vendor/coi-serviceworker/LICENSE` |
+| Emscripten | MIT / University of Illinois NCSA | toolchain and runtime JS |
+| The code of this project (`src/wasm`, `web/app`, `web/runtime`, `scripts`, `conf` except `conf/mvsce-stock/`, `docs`) | [Apache-2.0](LICENSE) | the explicit license that QPL section 6 requires for items that link with Hercules |
+| `conf/mvsce-stock/` (copies of the MVS/CE v3.0.0 stock configuration, for reference) | MVS/CE terms (the upstream repository has no license file) | not covered by this project's Apache-2.0 license |
+
+**Hercules QPL 1.0 obligations.** `hercules.wasm` is a modified, machine-executable form of Hercules. So:
+- The changes are distributed separately from the original, as patch files in `patches/hyperion/`
+  (section 3). They do not change any copyright notice (3a).
+- Every deployed bundle includes the license text (`licenses/hercules-QPL-1.0.html`), the copyright notice,
+  and a prominent notice (`SOURCE.txt`, the About dialog) that says where the complete source is: the
+  pinned Hyperion commit, the patches, the new linked files (`src/wasm/`) and the build scripts, at no
+  charge (section 4). The bundle also contains a copy of that source in `source/`.
+- The new files linked into the binary (`src/wasm/`) are published in source form with an explicit license
+  that allows use and redistribution (section 6).
+
+This project is not affiliated with IBM, the Hercules project, or the MVS/CE project.

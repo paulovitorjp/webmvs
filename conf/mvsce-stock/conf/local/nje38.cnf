@@ -1,0 +1,10 @@
+#############################################
+#
+# NJE38 CONFIG
+#
+#############################################
+#
+# TEMPORARY NJE38 SETTINGS BELOW, MODIFY FOR YOUR ENVIRONMENT
+#
+0602 TCPNJE 2703 LNODE=SYSA RNODE=SYSB LPORT=1175 RPORT=1175 RHOST=10.10.10.10
+#############################################

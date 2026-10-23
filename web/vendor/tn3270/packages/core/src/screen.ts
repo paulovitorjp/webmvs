@@ -1,0 +1,624 @@
+import { FA, MODEL_2 } from './constants.js';
+import { cp037, type CodePage } from './codepage.js';
+
+/**
+ * The 3270 character buffer.
+ *
+ * Held as flat typed arrays, the way the hardware does it: one array of EBCDIC
+ * bytes and a parallel array marking which positions are field attributes and
+ * what they contain. Fields are DERIVED by scanning for attribute positions,
+ * never stored as objects — a host that overwrites a field attribute mid-stream
+ * (MVS and CICS both do) must change the field structure, and that falls out
+ * for free when fields are computed rather than cached.
+ */
+
+/**
+ * Cell content is a tagged variant. Stage 1 had exactly one case; Programmable
+ * Symbol Sets (a committed stage 4 deliverable) will add
+ * `{ kind: 'ps', store, index }`, and consumers must dispatch on `kind` rather
+ * than assume a code page lookup.
+ *
+ * The three extended attributes are OPTIONAL and their absence is meaningful:
+ * it means "this cell specifies nothing, fall through to the base field
+ * attribute". That is not the same as any concrete color, so do not default
+ * them to 0x00 — `render.ts` needs the distinction. This mirrors x3270's
+ * `struct ea` (include/globals.h:364-374), which likewise carries the character
+ * and its attributes together.
+ */
+export type Cell = {
+  kind: 'char';
+  ebcdic: number;
+  /** Foreground color identification, 0xF0-0xFF. Absent means unspecified. */
+  fg?: number;
+  /** Background color identification, 0xF0-0xFF. Absent means unspecified. */
+  bg?: number;
+  /** Highlighting value (`XAH.*`). Absent means unspecified. */
+  gr?: number;
+};
+
+/** The subset of a cell's attributes a caller may set. See `Screen.setExtended`. */
+export interface ExtendedAttributes {
+  fg?: number;
+  bg?: number;
+  gr?: number;
+}
+
+export interface Field {
+  /** Address of the field attribute byte itself. */
+  attrAddr: number;
+  /**
+   * Address of the first data cell (attrAddr + 1, wrapped). For a
+   * zero-length field — one attribute immediately followed by another — this
+   * IS the next attribute's address, not a data cell. Callers that park the
+   * cursor here must check `length > 0` first; use `firstUnprotectedStart()`
+   * or `typableFields()`, which already do.
+   */
+  start: number;
+  /** Data cells in the field, excluding the attribute byte. */
+  length: number;
+  /**
+   * The raw, unnormalized attribute byte exactly as the host sent it. Real
+   * hosts set bits beyond the ones this module names (the base architecture
+   * requires the top two bits on, so a plain "unprotected" byte arrives as
+   * 0xC0, not 0x00). Consume this only via `&` with `FA.*` masks — never
+   * `===` — or normalization differences will make an identical-looking
+   * field compare unequal.
+   */
+  attr: number;
+  protected: boolean;
+  numeric: boolean;
+  /** Protected + numeric means the cursor skips the field entirely. */
+  autoSkip: boolean;
+  intensified: boolean;
+  hidden: boolean;
+  modified: boolean;
+}
+
+export interface ScreenSnapshot {
+  rows: number;
+  cols: number;
+  cursor: number;
+  cells: readonly Readonly<Cell>[];
+  fields: readonly Readonly<Field>[];
+  formatted: boolean;
+}
+
+export interface ScreenOptions {
+  /** The DEFAULT (Erase/Write) size. The screen starts here. */
+  rows?: number;
+  cols?: number;
+  /**
+   * The ALTERNATE (Erase/Write Alternate) size. Defaults to the default size,
+   * which is what a model 2 has and what every caller predating alternate-size
+   * support means.
+   */
+  alternateRows?: number;
+  alternateCols?: number;
+  codePage?: CodePage;
+}
+
+/** Rejects a geometry the buffer cannot be built from. */
+function checkGeometry(rows: number, cols: number): void {
+  if (!Number.isInteger(rows) || rows <= 0) {
+    throw new RangeError(`rows must be a positive integer, got ${rows}`);
+  }
+  if (!Number.isInteger(cols) || cols <= 0) {
+    throw new RangeError(`cols must be a positive integer, got ${cols}`);
+  }
+}
+
+/** Marker in the attribute array meaning "this position is not an attribute". */
+const NOT_ATTR = -1;
+
+export class Screen {
+  /**
+   * The CURRENT geometry, which Erase/Write and Erase/Write Alternate switch
+   * between. Mutable for that reason -- `cursor` above is public and mutable for
+   * the same one -- but only `resize` may write them.
+   */
+  rows = 0;
+  cols = 0;
+  size = 0;
+  cursor = 0;
+
+  /**
+   * The Erase/Write size. The screen starts here, as x3270's does (ctlr.c:341).
+   *
+   * NO LONGER `readonly`, and only `setSizes` may write it. A BIND is the second
+   * channel by which a host dictates geometry (Query Reply being the other), and it
+   * rewrites BOTH sizes -- so this cannot be fixed at construction any more.
+   */
+  defaultSize: { readonly rows: number; readonly cols: number };
+  /** The Erase/Write Alternate size. Equal to `defaultSize` on a model 2. */
+  alternateSize: { readonly rows: number; readonly cols: number };
+
+  private chars = new Uint8Array(0);
+  /** attrs[i] >= 0 means position i holds that field attribute value. */
+  private attrs = new Int16Array(0);
+  /**
+   * Extended attributes, one array each, parallel to `chars`.
+   *
+   * 0 means "unspecified". Every architected color is 0xF0-0xFF, so for `fgs`
+   * and `bgs` the sentinel is unambiguous.
+   *
+   * For `grs` it genuinely collapses two states, and that is SAFE rather than
+   * merely convenient: `XAH.DEFAULT` IS 0x00, so a host can set highlighting to
+   * a value this array cannot distinguish from "nothing set". The manual defines
+   * that value as meaning "the default action of the device"
+   * (pages.txt:10329-10331), so it renders identically to no highlighting at
+   * all — the same reasoning that lets `XAC_DEFAULT` (0x00 as a color VALUE)
+   * fall through to the base field attribute rather than being stored.
+   *
+   * DO NOT reach for `XA.RESET` to justify this. An earlier version of this
+   * comment did, and it was wrong in exactly the way `constants.ts` warns about:
+   * `XA.RESET` is 0x00 as an attribute TYPE, meaning "reset every type", which
+   * is a different concept from `XAH.DEFAULT` being 0x00 as a highlighting
+   * VALUE. Both being zero is a coincidence of encoding, not a shared meaning.
+   */
+  private fgs = new Uint8Array(0);
+  private bgs = new Uint8Array(0);
+  private grs = new Uint8Array(0);
+  private readonly codePage: CodePage;
+
+  constructor(opts: ScreenOptions = {}) {
+    const rows = opts.rows ?? MODEL_2.rows;
+    const cols = opts.cols ?? MODEL_2.cols;
+    checkGeometry(rows, cols);
+    const altRows = opts.alternateRows ?? rows;
+    const altCols = opts.alternateCols ?? cols;
+    checkGeometry(altRows, altCols);
+    this.defaultSize = { rows, cols };
+    this.alternateSize = { rows: altRows, cols: altCols };
+    this.codePage = opts.codePage ?? cp037;
+    this.allocate(rows, cols);
+  }
+
+  // ---- size switching ----
+
+  /**
+   * Build the buffer at `rows` x `cols`, discarding whatever was there.
+   *
+   * Discarding is CORRECT rather than a shortcut: the only callers are
+   * Erase/Write and Erase/Write Alternate, both of which erase the screen as
+   * their defining act, so there is no surviving content a resize could be
+   * accused of losing.
+   */
+  private allocate(rows: number, cols: number): void {
+    this.rows = rows;
+    this.cols = cols;
+    this.size = rows * cols;
+    this.chars = new Uint8Array(this.size);
+    this.attrs = new Int16Array(this.size).fill(NOT_ATTR);
+    this.fgs = new Uint8Array(this.size);
+    this.bgs = new Uint8Array(this.size);
+    this.grs = new Uint8Array(this.size);
+    this.cursor = 0;
+  }
+
+  /**
+   * Switch geometry, reporting whether anything actually changed.
+   *
+   * The return value is what lets a caller repaint only when it must: on a model
+   * 2 the default and alternate sizes are equal, so every Erase/Write Alternate
+   * in a whole session returns false and costs nothing.
+   */
+  resize(rows: number, cols: number): boolean {
+    checkGeometry(rows, cols);
+    if (rows === this.rows && cols === this.cols) return false;
+    this.allocate(rows, cols);
+    return true;
+  }
+
+  /** Erase/Write: back to the default size. */
+  useDefaultSize(): boolean {
+    return this.resize(this.defaultSize.rows, this.defaultSize.cols);
+  }
+
+  /** Erase/Write Alternate: to the alternate size. */
+  useAlternateSize(): boolean {
+    return this.resize(this.alternateSize.rows, this.alternateSize.cols);
+  }
+
+  /**
+   * Replace what Erase/Write and Erase/Write Alternate MEAN.
+   *
+   * The only callers are BIND (which sets the host's geometry) and UNBIND (which
+   * reverts to the model's). Deliberately narrow: `resize` switches the CURRENT
+   * geometry between two fixed sizes, whereas this changes what those two sizes are,
+   * and no existing method could express that.
+   *
+   * It does NOT change the current geometry or erase anything. x3270 calls
+   * `ctlr_erase(false)` separately after `process_bind`, and keeping the two apart
+   * means a caller that only wants to reinterpret EW/EWA does not pay for a repaint.
+   *
+   * Deliberately does NOT call `acceptBindDims` (bind.ts): that is the decision, this
+   * is the mutation, and keeping them apart is what lets the decision be tested
+   * without a Screen. A caller that skips the check can install a geometry
+   * `acceptBindDims` would have refused -- that is intentional, not an oversight: the
+   * check is a POLICY (x3270's `bind_limit` toggle can be off, in which case x3270
+   * applies the BIND's geometry unchecked, ctlr.c's callers of `process_bind` do not
+   * gate on it either), while this method is the mechanism every policy needs.
+   */
+  setSizes(
+    def: { rows: number; cols: number },
+    alt: { rows: number; cols: number },
+  ): void {
+    checkGeometry(def.rows, def.cols);
+    checkGeometry(alt.rows, alt.cols);
+    this.defaultSize = { rows: def.rows, cols: def.cols };
+    this.alternateSize = { rows: alt.rows, cols: alt.cols };
+  }
+
+  /** Throws if `addr` is not an integer in [0, size). */
+  private check(addr: number): void {
+    if (!Number.isInteger(addr) || addr < 0 || addr >= this.size) {
+      throw new RangeError(`address ${addr} out of range for a ${this.size}-cell buffer`);
+    }
+  }
+
+  // ---- geometry ----
+
+  /** Display row/column, 1-based, as the OIA and s3270 report them. */
+  toRowCol(addr: number): { row: number; col: number } {
+    this.check(addr);
+    return {
+      row: Math.floor(addr / this.cols) + 1,
+      col: (addr % this.cols) + 1,
+    };
+  }
+
+  /** Row and column are both 1-based. Throws if the result would be out of range. */
+  fromRowCol(row: number, col: number): number {
+    if (!Number.isInteger(row) || row < 1 || row > this.rows) {
+      throw new RangeError(`row ${row} out of range for a ${this.rows}-row screen`);
+    }
+    if (!Number.isInteger(col) || col < 1 || col > this.cols) {
+      throw new RangeError(`col ${col} out of range for a ${this.cols}-col screen`);
+    }
+    return (row - 1) * this.cols + (col - 1);
+  }
+
+  /** Next address, wrapping at the end of the buffer. */
+  inc(addr: number): number {
+    return (addr + 1) % this.size;
+  }
+
+  /** Previous address, wrapping at the start of the buffer. */
+  dec(addr: number): number {
+    return (addr - 1 + this.size) % this.size;
+  }
+
+  // ---- cells ----
+
+  cellAt(addr: number): Cell {
+    this.check(addr);
+    const cell: Cell = { kind: 'char', ebcdic: this.chars[addr]! };
+    // Conditional assignment, not `fg: x || undefined`: the property must be
+    // ABSENT when unspecified, because `'fg' in cell` is how a consumer asks.
+    if (this.fgs[addr]! !== 0) cell.fg = this.fgs[addr]!;
+    if (this.bgs[addr]! !== 0) cell.bg = this.bgs[addr]!;
+    if (this.grs[addr]! !== 0) cell.gr = this.grs[addr]!;
+    return cell;
+  }
+
+  /**
+   * Merge extended attributes into one cell.
+   *
+   * MERGE, NOT REPLACE, because the manual's composite rule requires it: "The
+   * set of type-value pairs applied during character processing is a composite,
+   * by attribute type, of the last value specified in previously encountered SA
+   * orders" (p. 4-6, pages.txt:2995-2996). An SA setting color must leave a
+   * previously set highlighting alone. Pass `clearExtended` to reset.
+   */
+  setExtended(addr: number, ext: ExtendedAttributes): void {
+    this.check(addr);
+    if (ext.fg !== undefined) this.fgs[addr] = ext.fg & 0xff;
+    if (ext.bg !== undefined) this.bgs[addr] = ext.bg & 0xff;
+    if (ext.gr !== undefined) this.grs[addr] = ext.gr & 0xff;
+  }
+
+  /** Return one cell's extended attributes to "unspecified". */
+  clearExtended(addr: number): void {
+    this.check(addr);
+    this.fgs[addr] = 0;
+    this.bgs[addr] = 0;
+    this.grs[addr] = 0;
+  }
+
+  /**
+   * Write a character. If the position held a field attribute, that attribute
+   * is destroyed — the host is allowed to do this, and the field structure
+   * changes as a result.
+   *
+   * Deliberately does NOT touch fgs/bgs/grs. The executor decides what
+   * extended attributes a written character carries (it holds the running SA
+   * state) and calls setExtended right after this. Clearing here would
+   * discard them a moment later.
+   */
+  setChar(addr: number, ebcdic: number): void {
+    this.check(addr);
+    this.chars[addr] = ebcdic & 0xff;
+    this.attrs[addr] = NOT_ATTR;
+  }
+
+  isFieldAttribute(addr: number): boolean {
+    this.check(addr);
+    return this.attrs[addr]! >= 0;
+  }
+
+  attributeAt(addr: number): number | null {
+    this.check(addr);
+    const a = this.attrs[addr]!;
+    return a >= 0 ? a : null;
+  }
+
+  setFieldAttribute(addr: number, attr: number): void {
+    this.check(addr);
+    this.attrs[addr] = attr & 0xff;
+    // An attribute position displays as a blank and holds no character.
+    this.chars[addr] = 0x00;
+    // "If the display receives an SF order, it sets the associated extended
+    // field attribute to its default value" (p. 4-4, pages.txt:2869-2870). SFE
+    // overrides this by calling setExtended AFTER this returns; a plain SF must
+    // leave the position clean, or a field following a colored one inherits
+    // color the host never gave it.
+    this.clearExtended(addr);
+  }
+
+  isFormatted(): boolean {
+    for (let i = 0; i < this.size; i++) if (this.attrs[i]! >= 0) return true;
+    return false;
+  }
+
+  // ---- fields (all derived) ----
+
+  /** The field governing `addr`, found by scanning backwards for an attribute. */
+  fieldAt(addr: number): Field | null {
+    this.check(addr);
+    let a = addr;
+    for (let n = 0; n < this.size; n++) {
+      if (this.attrs[a]! >= 0) return this.makeField(a);
+      a = this.dec(a);
+    }
+    return null; // unformatted
+  }
+
+  fields(): Field[] {
+    const out: Field[] = [];
+    for (let i = 0; i < this.size; i++) {
+      if (this.attrs[i]! >= 0) out.push(this.makeField(i));
+    }
+    return out;
+  }
+
+  private makeField(attrAddr: number): Field {
+    const attr = this.attrs[attrAddr]!;
+    const start = this.inc(attrAddr);
+    let length = 0;
+    let a = start;
+    while (a !== attrAddr && this.attrs[a]! < 0) {
+      length++;
+      a = this.inc(a);
+    }
+    const protectedField = (attr & FA.PROTECT) !== 0;
+    const numeric = (attr & FA.NUMERIC) !== 0;
+    const intensity = attr & FA.INTENSITY;
+    return {
+      attrAddr,
+      start,
+      length,
+      attr,
+      protected: protectedField,
+      numeric,
+      autoSkip: protectedField && numeric,
+      intensified: intensity === FA.INT_HIGH_SEL,
+      hidden: intensity === FA.INT_ZERO_NSEL,
+      modified: (attr & FA.MODIFY) !== 0,
+    };
+  }
+
+  /**
+   * Set the MDT bit on the field attribute at `attrAddr`. `attrAddr` must be
+   * the attribute's own address (`field.attrAddr`), not any address inside
+   * the field — unlike x3270's `mdt_set`, this does not resolve an arbitrary
+   * in-field address for you. Passing a non-attribute address is a silent
+   * no-op; callers that have a `Field` should always pass its `attrAddr`.
+   */
+  setMDT(attrAddr: number): void {
+    this.check(attrAddr);
+    if (this.attrs[attrAddr]! >= 0) {
+      this.attrs[attrAddr] = this.attrs[attrAddr]! | FA.MODIFY;
+    }
+  }
+
+  /**
+   * Reset MDT in EVERY field, protected or not. This is WCC reset-MDT: manual
+   * Table 3-2 bit 7 says "all MDT bits in the device's existing character
+   * buffer are reset," and x3270's handler (`ctlr.c:1439-1451`, which tests
+   * `ea_buf[baddr].fa` only) has no protection check. This matters because Read
+   * Modified filters on MDT alone (`ctlr.c:822`, inside `ctlr_read_modified()`)
+   * — a protected field left carrying MDT would otherwise leak
+   * its data to the host on the next read. Erase Input is the
+   * unprotected-only operation; see `clearUnprotectedMDT`.
+   */
+  clearAllMDT(): void {
+    for (let i = 0; i < this.size; i++) {
+      const a = this.attrs[i]!;
+      if (a >= 0) this.attrs[i] = a & ~FA.MODIFY;
+    }
+  }
+
+  /** Reset MDT in unprotected fields only (Erase Input, manual 4-14). */
+  clearUnprotectedMDT(): void {
+    for (let i = 0; i < this.size; i++) {
+      const a = this.attrs[i]!;
+      if (a >= 0 && (a & FA.PROTECT) === 0) {
+        this.attrs[i] = a & ~FA.MODIFY;
+      }
+    }
+  }
+
+  // ---- clearing ----
+
+  /** Erase/Write and the Clear key: everything goes, including attributes. */
+  clear(): void {
+    this.chars.fill(0x00);
+    this.attrs.fill(NOT_ATTR);
+    // EW/EWA "resets any extended field attributes and character attributes
+    // associated with the nulled characters to their default values"
+    // (pages.txt:2990-2992). This is also the path the Clear AID takes
+    // (`Session.sendAID`'s `AID.CLEAR` branch), which is the manual's fourth SA reset trigger --
+    // "The Clear key is pressed" (pages.txt:2979). So implementing it here
+    // satisfies both rules at once.
+    this.fgs.fill(0);
+    this.bgs.fill(0);
+    this.grs.fill(0);
+    this.cursor = 0;
+  }
+
+  /**
+   * Erase All Unprotected: null the data in unprotected fields and reset their
+   * MDT. Field attributes themselves survive. On an unformatted screen there
+   * are no field attributes to preserve — the whole buffer is, by definition,
+   * unprotected — so this clears everything, matching x3270's
+   * `else { ctlr_clear(true); }` at `ctlr.c:1443-1445`.
+   */
+  eraseAllUnprotected(): void {
+    if (!this.isFormatted()) {
+      this.clear();
+      return;
+    }
+    for (const f of this.fields()) {
+      if (f.protected) continue;
+      let a = f.start;
+      for (let n = 0; n < f.length; n++) {
+        // Must write chars[] directly, not via setChar: setChar also clears
+        // attrs[], which would destroy the very field attributes EAU is
+        // required to preserve.
+        this.chars[a] = 0x00;
+        // Extended attributes go with the character data they decorate. EAU is
+        // NOT one of the manual's four SA-state reset triggers, so this line is
+        // an inference rather than a quotation — but leaving them would show
+        // stale color on a cell whose data has just been nulled. Written
+        // directly rather than via clearExtended for the same reason as chars[]
+        // above: one bounds check per cell is wasted work in a hot loop.
+        this.fgs[a] = 0;
+        this.bgs[a] = 0;
+        this.grs[a] = 0;
+        a = this.inc(a);
+      }
+      this.attrs[f.attrAddr] = f.attr & ~FA.MODIFY;
+    }
+  }
+
+  /**
+   * The first cell a user could type into: the start of the first
+   * unprotected field, skipping zero-length fields (a zero-length field's
+   * `start` IS the next attribute — landing the cursor there and typing would
+   * collapse two fields). Mirrors x3270's `next_unprotected`
+   * (`ctlr.c:623-638`). Returns null if there is no such field.
+   */
+  firstUnprotectedStart(): number | null {
+    for (const f of this.fields()) {
+      if (!f.protected && f.length > 0) return f.start;
+    }
+    return null;
+  }
+
+  /**
+   * Unprotected, non-auto-skip fields with room for data — the set Tab and
+   * Back Tab cycle through. Zero-length fields are excluded for the same
+   * reason `firstUnprotectedStart` excludes them.
+   */
+  typableFields(): Field[] {
+    return this.fields().filter((f) => !f.protected && !f.autoSkip && f.length > 0);
+  }
+
+  /**
+   * Visit every cell from `start` up to (excluding) `stop`, wrapping as
+   * needed, passing each cell's governing field (or null if unformatted) and
+   * whether the cell itself is that field's attribute byte. Carries the
+   * attribute forward instead of calling `fieldAt` per cell, so a full sweep
+   * is O(size) rather than O(size^2) — the naive per-cell `fieldAt` scan costs
+   * ~3.7M operations over a full 1920-cell buffer. Mirrors x3270's
+   * `current_fa` tracking (`ctlr.c:1809-1816`).
+   */
+  forEachCellWithField(
+    start: number,
+    stop: number,
+    cb: (addr: number, field: Field | null, isAttr: boolean) => void,
+  ): void {
+    this.check(start);
+    this.check(stop);
+    let field = this.fieldAt(start);
+    let a = start;
+    do {
+      const attr = this.attrs[a]!;
+      const isAttr = attr >= 0;
+      if (isAttr) field = this.makeField(a);
+      cb(a, field, isAttr);
+      a = this.inc(a);
+    } while (a !== stop);
+  }
+
+  // ---- output ----
+
+  /** Raw buffer contents, for tests and diagnostics. */
+  readBuffer(): Uint8Array {
+    return Uint8Array.from(this.chars);
+  }
+
+  /** One display row as text, 1-based. Nulls and attributes render as spaces. */
+  rowText(row: number): string {
+    if (!Number.isInteger(row) || row < 1 || row > this.rows) {
+      throw new RangeError(`row ${row} out of range for a ${this.rows}-row screen`);
+    }
+    let out = '';
+    const base = (row - 1) * this.cols;
+    for (let c = 0; c < this.cols; c++) {
+      const addr = base + c;
+      if (this.attrs[addr]! >= 0) {
+        out += ' ';
+        continue;
+      }
+      const b = this.chars[addr]!;
+      out += b === 0x00 ? ' ' : this.codePage.toUnicode(b);
+    }
+    return out;
+  }
+
+  toText(): string {
+    const lines: string[] = [];
+    for (let r = 1; r <= this.rows; r++) lines.push(this.rowText(r));
+    return lines.join('\n');
+  }
+
+  /**
+   * An immutable view for the UI or for assertions. The `Readonly<Cell>` /
+   * `Readonly<Field>` element types make `snap.cells[0].ebcdic = ...` a
+   * compile error, and each array and element is also `Object.freeze`d so the
+   * same mutation fails at runtime too (e.g. from plain JS callers).
+   */
+  snapshot(): ScreenSnapshot {
+    const cells: Readonly<Cell>[] = new Array(this.size);
+    // Via cellAt rather than building the object inline, deliberately: cellAt
+    // owns the "absent means unspecified" conditional-assignment rule, and
+    // duplicating it here is how the two would drift. The cost is one redundant
+    // bounds check per cell — 1920 of them, on a call made once per host record,
+    // which is immaterial. The tight loop in eraseAllUnprotected makes the
+    // opposite choice for the opposite reason; both are intentional.
+    for (let i = 0; i < this.size; i++) {
+      cells[i] = Object.freeze(this.cellAt(i));
+    }
+    const fields = this.fields().map((f) => Object.freeze(f));
+    const formatted = fields.length > 0;
+    return {
+      rows: this.rows,
+      cols: this.cols,
+      cursor: this.cursor,
+      cells: Object.freeze(cells),
+      fields: Object.freeze(fields),
+      formatted,
+    };
+  }
+}

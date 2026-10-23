@@ -1,0 +1,25 @@
+diff --git a/console.c b/console.c
+index 72635053..ef4f4e30 100644
+--- a/console.c
++++ b/console.c
+@@ -3421,6 +3421,20 @@ int prev_rlen3270;
+     if (sysblk.herclogo == NULL)
+         init_logo();
+ 
++#if defined( __EMSCRIPTEN__ ) && defined( WASM_NO_CONSOLE_LISTENER )
++    /* Stub for the wasm build without the socket shim               */
++    /* (patch 0008 / src/wasm/wasmsock.c): Emscripten sockets cannot */
++    /* listen for TCP clients, and FD_SET of a failed (-1) listening */
++    /* socket writes out of bounds. No 3270 client can connect, so   */
++    /* just wait until the last console device is detached.          */
++    logmsg( "wasm: console listener disabled (no socket shim); "
++            "3270 devices stay unconnected\n" );
++    while (console_cnslcnt > 0)
++        USLEEP( 100 * 1000 );
++    LOG_THREAD_END( CON_CONN_THREAD_NAME );
++    return NULL;
++#endif
++
+     /* Save starting sysblk.cnslport value
+        and create starting listening socket */
+     curr_cnslport = strdup( sysblk.cnslport );

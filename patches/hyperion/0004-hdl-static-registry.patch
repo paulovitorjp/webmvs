@@ -1,0 +1,48 @@
+diff --git a/hdl.c b/hdl.c
+index 07a3b292..d13dc2a0 100644
+--- a/hdl.c
++++ b/hdl.c
+@@ -117,6 +117,9 @@ DLL_EXPORT int hdl_main
+     }
+ 
+     hdl_curmod->name       =  strdup( "*Hercules" );
++#if defined( __EMSCRIPTEN__ )
++    hdl_curmod->handle     =  NULL;     /* (static registry: no handle) */
++#endif
+     hdl_curmod->flags      =  (HDL_LOAD_MAIN | HDL_LOAD_NOUNLOAD);
+ 
+     hdl_curmod->depsec_ep  =  hdl_check_depends_ep;
+diff --git a/hdl.h b/hdl.h
+index de903d45..d12ab111 100644
+--- a/hdl.h
++++ b/hdl.h
+@@ -220,7 +220,28 @@ HDL_DLL_IMPORT void         hdl_repins   ( bool replace, HDLINS* ins );
+ /*                     HDL_USE_LIBTOOL                               */
+ /*-------------------------------------------------------------------*/
+ 
+-#if !defined( HDL_USE_LIBTOOL )
++#if defined( __EMSCRIPTEN__ )
++  /* No dlopen in the wasm build: every HDL module is linked into the */
++  /* one binary with renamed entry points, and a static registry      */
++  /* (src/wasm/hdl_static.c) maps "module name + entry-point name" to */
++  /* the function. Unknown modules and symbols return NULL, the same  */
++  /* as a failed dlopen/dlsym, so HDL's normal fallbacks still apply. */
++  HDL_DLL_IMPORT void*        hdl_static_open  ( const char* name );
++  HDL_DLL_IMPORT void*        hdl_static_sym   ( void* handle, const char* symbol );
++  HDL_DLL_IMPORT int          hdl_static_close ( void* handle );
++  HDL_DLL_IMPORT const char*  hdl_static_error ( void );
++  #undef  dlopen
++  #undef  dlsym
++  #undef  dlclose
++  #undef  dlerror
++  #undef  RTLD_NOW
++  #define dlinit()
++  #define dlopen(_name, _flags)     hdl_static_open(_name)
++  #define dlsym(_handle, _symbol)   hdl_static_sym(_handle, _symbol)
++  #define dlclose(_handle)          hdl_static_close(_handle)
++  #define dlerror()                 hdl_static_error()
++  #define RTLD_NOW                  0
++#elif !defined( HDL_USE_LIBTOOL )
+   #define dlinit()
+ #else
+   #define dlinit()                  lt_dlinit()

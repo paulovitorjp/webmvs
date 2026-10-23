@@ -1,0 +1,349 @@
+webmvs patch 0019: checkpoint staging.
+
+The checkpoint command (patches 0015, 0018) writes the shadow-file copies (full checkpoint) or shadows.dlt
+(delta) and machine.srf straight into the slot directory on OPFS while the CPUs are stopped. In the browser
+every OPFS file create, write, fsync and close is a round trip to the WasmFS OPFS proxy thread (Firefox:
+30-50 ms per file, Chromium 3-5 ms), so most of the pause was file I/O. With stage=<dir> (browser default
+/tmp/ckpt-stage, the WasmFS memory backend) these files are written into memory during the pause and copied
+into the slot after sr_start_cpus(); the crc32 of machine.srf is taken from the staged copy (same bytes);
+checkpoint.json is still written last, so the slot becomes valid only when everything is there.
+New: option stage=<dir> (stage= turns it off; native default off), "storeMs" in checkpoint.json, and
+", store %d ms" at the end of the HHC02030I text (after the 0018 suffix). Needs 0015, 0017 and 0018.
+The staged machine.srf and shadows.dlt get their capacity once before the pause (largest size so far
++ 25 %): a WasmFS memory file keeps its capacity when it is opened again with O_TRUNC, so the small writes
+do not grow and copy the buffer at every checkpoint.
+
+diff --git a/sr.c b/sr.c
+index c6d6a6c9..9d2c5c4a 100644
+--- a/sr.c
++++ b/sr.c
+@@ -732,6 +732,9 @@ DEVBLK  *dev;
+ /*          screens=<ms> (3270 Read Buffer reply limit per terminal, */
+ /*                   0 = do not save the screens; default 2000)      */
+ /*          sync=0|1   (fsync the files; default 1)                  */
++/*          stage=<dir> (write the files there during                */
++/*                   the pause, copy them into <dir> after it;       */
++/*                   browser default /tmp/ckpt-stage, native off)    */
+ /*-------------------------------------------------------------------*/
+ #define CKPT_MAXFILES 64
+ 
+@@ -778,6 +781,112 @@ static int ckpt_dlt_open( const char* path, CKDLT* w )
+     return ckdlt_put( w, "MVSCKDL1", 8 );
+ }
+ 
++/*-------------------------------------------------------------------*/
++/* Checkpoint staging (patch 0019).                                  */
++/* stage=<dir> writes the shadow copies (full), shadows.dlt (delta)  */
++/* and machine.srf into <dir> while the CPUs are stopped, and copies */
++/* them into the checkpoint directory after the CPUs run again (same */
++/* bytes, same CRCs; the checkpoint is valid only when               */
++/* checkpoint.json exists, which is still written last). The browser */
++/* build stages in the WasmFS memory directory /tmp/ckpt-stage by    */
++/* default: on OPFS every file create, write, fsync and close is a   */
++/* round trip to the OPFS proxy thread (Firefox: 30-50 ms per file), */
++/* which made up most of the pause. stage= (empty) turns staging     */
++/* off; native default: off.                                         */
++/*-------------------------------------------------------------------*/
++static U64 ckpt_hint_srf = 0;           /* largest machine.srf so far  */
++static U64 ckpt_hint_dlt = 0;           /* largest shadows.dlt so far  */
++
++static void ckpt_clear_stage( const char* stage )
++{
++    DIR*            d;
++    struct dirent*  e;
++    char            p[ MAX_PATH ];
++
++    if (!(d = opendir( stage )))
++        return;
++    while ((e = readdir( d )))
++    {
++        if (!strcmp( e->d_name, "." ) || !strcmp( e->d_name, ".." ))
++            continue;
++        snprintf( p, sizeof( p ), "%s/%s", stage, e->d_name );
++        unlink( p );
++    }
++    closedir( d );
++}
++
++/* Give a staged file its capacity before the pause: a WasmFS memory */
++/* file keeps its capacity when it is opened again with O_TRUNC, so  */
++/* the small writes of gzip / ckdlt_put do not grow (and copy) the   */
++/* buffer again and again (0019: that left the heap about 7.5 MiB    */
++/* higher in a soak). Only a hint: errors are ignored.               */
++static void ckpt_presize( const char* path, U64 last, U64 dflt )
++{
++    int   fd = HOPEN( path, O_WRONLY | O_CREAT | O_TRUNC | O_BINARY, S_IRUSR | S_IWUSR );
++    off_t want = (off_t)(last ? last + last / 4 + 65536 : dflt);
++
++    if (fd < 0)
++        return;
++    if (ftruncate( fd, want ) < 0)
++        want = 0;
++    close( fd );
++}
++
++static int ckpt_move_file( const char* src, const char* dst, int dosync, char* err, size_t errlen )
++{
++    BYTE*   buf;
++    ssize_t n;
++    int     sfd, dfd, rc = 0;
++
++    if ((sfd = HOPEN( src, O_RDONLY | O_BINARY )) < 0)
++    {
++        snprintf( err, errlen, "open %s: %s", src, strerror( errno ));
++        return -1;
++    }
++    if (!(buf = malloc( 256 * 1024 )))
++    {
++        snprintf( err, errlen, "malloc: %s", strerror( errno ));
++        close( sfd );
++        return -1;
++    }
++    dfd = HOPEN( dst, O_WRONLY | O_CREAT | O_TRUNC | O_BINARY, S_IRUSR | S_IWUSR | S_IRGRP );
++    if (dfd < 0)
++    {
++        snprintf( err, errlen, "open %s: %s", dst, strerror( errno ));
++        free( buf );
++        close( sfd );
++        return -1;
++    }
++    while ((n = read( sfd, buf, 256 * 1024 )) > 0)
++    {
++        if (write( dfd, buf, (size_t) n ) != n)
++        {
++            snprintf( err, errlen, "write %s: %s", dst, strerror( errno ));
++            rc = -1;
++            break;
++        }
++    }
++    if (n < 0 && rc == 0)
++    {
++        snprintf( err, errlen, "read %s: %s", src, strerror( errno ));
++        rc = -1;
++    }
++    if (rc == 0 && dosync && fsync( dfd ) < 0)
++    {
++        snprintf( err, errlen, "fsync %s: %s", dst, strerror( errno ));
++        rc = -1;
++    }
++    if (close( dfd ) < 0 && rc == 0)
++    {
++        snprintf( err, errlen, "close %s: %s", dst, strerror( errno ));
++        rc = -1;
++    }
++    free( buf );
++    close( sfd );
++    unlink( src );
++    return rc;
++}
++
+ int checkpoint_cmd( int argc, char* argv[], char* cmdline )
+ {
+ static CCKD_CKPT_FILE files[ CKPT_MAXFILES ];
+@@ -790,7 +899,7 @@ int          ms_stop = 0, ms_drain = 0, ms_hash = 0, ms_cckd = 0, ms_srf = 0, ms
+ CPU_BITMAP   mask = 0;
+ struct timeval t0, tv;
+ char         srf[ MAX_PATH ], man[ MAX_PATH ], dlt[ MAX_PATH ], vdir[ MAX_PATH ], basesrf[ MAX_PATH ];
+-char         mode[ 8 ], why[ 1024 ], bid[ 512 ], kwhy[ 256 ] = "";
++char         mode[ 8 ], why[ 1024 ], bid[ 512 ], kwhy[ 384 ] = "";
+ char         err[ 512 ];
+ SR_FILE      file;
+ DEVBLK      *dev, *busy = NULL;
+@@ -800,7 +909,17 @@ S64          dirty = 0;
+ U64          cursh = 0;
+ CKDLT        w;
+ FILE        *mf;
+-#define CKPT_USAGE "usage: checkpoint <dir> [level=0..9] [wait=ms] [screens=ms] [sync=0|1] [incr=0|1] [base=<dir>] [maxdelta=1..100] [maxshadow=1..100] [verify=0|1]"
++#if defined( __EMSCRIPTEN__ )
++static char  defstage[] = "/tmp/ckpt-stage";
++char        *stage = defstage;          /* see above                  */
++#else
++char        *stage = NULL;
++#endif
++const char  *wdir;                      /* where steps 3 and 4 write  */
++int          staged = 0, ms_store = 0, mrc = 0;
++char         srfw[ MAX_PATH ], dltw[ MAX_PATH ], src2[ MAX_PATH ], dst2[ MAX_PATH ];
++struct timeval t1;
++#define CKPT_USAGE "usage: checkpoint <dir> [level=0..9] [wait=ms] [screens=ms] [sync=0|1] [incr=0|1] [base=<dir>] [maxdelta=1..100] [maxshadow=1..100] [verify=0|1] [stage=<dir>]"
+ 
+     UNREFERENCED( cmdline );
+     w.fd = -1;
+@@ -816,6 +935,7 @@ FILE        *mf;
+         else if (!strncasecmp( argv[i], "maxdelta=", 9 )) maxdelta = atoi( argv[i] + 9 );
+         else if (!strncasecmp( argv[i], "verify=",   7 )) verify   = atoi( argv[i] + 7 ) != 0;
+         else if (!strncasecmp( argv[i], "maxshadow=",10 )) maxshadow = atoi( argv[i] + 10 );
++        else if (!strncasecmp( argv[i], "stage=",    6 )) stage    = argv[i] + 6;
+         else if (!dir && !strchr( argv[i], '=' ))         dir      = argv[i];
+         else
+         {
+@@ -841,6 +961,25 @@ FILE        *mf;
+     snprintf( dlt, sizeof( dlt ), "%s/shadows.dlt", dir );
+     snprintf( vdir, sizeof( vdir ), "%s/verify", dir );
+ 
++    /* the staging directory (no staging if it cannot                */
++    /* be made, e.g. no /tmp)                                         */
++    wdir = dir;
++    if (stage && *stage && strcmp( stage, dir ) && strlen( stage ) <= MAX_PATH - 64
++        && (mkdir( stage, S_IRWXU ) == 0 || errno == EEXIST))
++    {
++        ckpt_clear_stage( stage );
++        wdir = stage;
++        staged = 1;
++    }
++    snprintf( srfw, sizeof( srfw ), "%s/machine.srf", wdir );
++    snprintf( dltw, sizeof( dltw ), "%s/shadows.dlt", wdir );
++    if (staged)
++    {
++        ckpt_presize( srfw, ckpt_hint_srf, 3 * 1024 * 1024 );
++        if (incr && base)
++            ckpt_presize( dltw, ckpt_hint_dlt, 1024 * 1024 );
++    }
++
+     if (mkdir( dir, S_IRWXU | S_IRGRP | S_IXGRP ) < 0 && errno != EEXIST)
+     {
+         snprintf( why, sizeof( why ), "mkdir %s: %s", dir, strerror( errno ));
+@@ -932,14 +1071,18 @@ FILE        *mf;
+     if (kind == 2)
+     {
+         unlink( dlt );
+-        if (ckpt_dlt_open( dlt, &w ) < 0)
++        if (ckpt_dlt_open( dltw, &w ) < 0)
+         {
+-            snprintf( why, sizeof( why ), "open %s: %s", dlt, strerror( errno ));
++            snprintf( why, sizeof( why ), "open %s: %s", dltw, strerror( errno ));
+             goto ckpt_fail;
+         }
+     }
+     else
++    {
+         unlink( dlt );              /* (a full slot has no delta)   */
++        if (staged)
++            unlink( dltw );
++    }
+     if (verify && kind == 2 && mkdir( vdir, S_IRWXU | S_IRGRP | S_IXGRP ) < 0 && errno != EEXIST)
+     {
+         snprintf( why, sizeof( why ), "mkdir %s: %s", vdir, strerror( errno ));
+@@ -951,7 +1094,7 @@ FILE        *mf;
+             continue;
+         if (dev->cckd_ext)
+         {
+-            n = cckd_ckpt_dev( dev, dir, dosync, waitms, files + nfiles,
++            n = cckd_ckpt_dev( dev, wdir, staged ? 0 : dosync, waitms, files + nfiles,
+                                CKPT_MAXFILES - nfiles, err, sizeof( err ),
+                                kind == 2 ? CKPT_DELTA : CKPT_FULL, &w );
+             if (n < 0)
+@@ -992,7 +1135,7 @@ FILE        *mf;
+         if (close( w.fd ) < 0 || n < 0)
+         {
+             w.fd = -1;
+-            snprintf( why, sizeof( why ), "writing %s: %s", dlt, strerror( errno ));
++            snprintf( why, sizeof( why ), "writing %s: %s", dltw, strerror( errno ));
+             goto ckpt_fail;
+         }
+         w.fd = -1;
+@@ -1021,9 +1164,9 @@ FILE        *mf;
+             goto ckpt_fail;
+         }
+     }
+-    if (!(file = SR_OPEN( srf, mode )))
++    if (!(file = SR_OPEN( srfw, mode )))
+     {
+-        snprintf( why, sizeof( why ), "open %s: %s", srf, strerror( errno ));
++        snprintf( why, sizeof( why ), "open %s: %s", srfw, strerror( errno ));
+         goto ckpt_fail;
+     }
+     ck_ms.mode = kind;
+@@ -1035,7 +1178,7 @@ FILE        *mf;
+     ck_ms.mode = 0;
+     if (SR_CLOSE( file ) != 0 || n < 0)
+     {
+-        snprintf( why, sizeof( why ), "writing %s failed", srf );
++        snprintf( why, sizeof( why ), "writing %s failed", srfw );
+         goto ckpt_fail;
+     }
+     ms_srf = sr_ms_since( &t0 ) - ms_stop - ms_drain - ms_hash - ms_cckd;
+@@ -1046,21 +1189,50 @@ FILE        *mf;
+     ms_pause = sr_ms_since( &t0 );
+     CK_PHASE( 2 );
+ 
+-    if (ckpt_file_crc( srf, &srfsize, &srfcrc, dosync ) < 0)
++    /* (0019: staged = the crc of the staged copy in memory; the copy */
++    /* into <dir> below writes the same bytes and fsyncs them)        */
++    if (ckpt_file_crc( srfw, &srfsize, &srfcrc, staged ? 0 : dosync ) < 0)
+     {
+-        snprintf( why, sizeof( why ), "reading %s back: %s", srf, strerror( errno ));
++        snprintf( why, sizeof( why ), "reading %s back: %s", srfw, strerror( errno ));
+         if (kind == 1) ck_valid = 0;
++        if (staged) ckpt_clear_stage( wdir );
+         WRMSG( HHC02031, "E", dir, why );
+         CK_ENDED();
+         return -1;
+     }
+-    if (kind == 2 && dosync)
++    if (kind == 2 && dosync && !staged)
+     {
+         int dfd = HOPEN( dlt, O_RDWR | O_BINARY );
+         if (dfd >= 0) { fsync( dfd ); close( dfd ); }
+     }
+     ms_crc = sr_ms_since( &t0 ) - ms_pause;
+ 
++    /* 5b. the staged files into <dir> (CPUs running)                */
++    if (staged)
++    {
++        gettimeofday( &t1, NULL );
++        mrc = ckpt_move_file( srfw, srf, dosync, err, sizeof( err ));
++        if (mrc == 0 && kind == 2)
++            mrc = ckpt_move_file( dltw, dlt, dosync, err, sizeof( err ));
++        for (i = 0; i < nfiles && mrc == 0 && kind != 2; i++)
++        {
++            snprintf( src2, sizeof( src2 ), "%s/%s", wdir, files[i].name );
++            snprintf( dst2, sizeof( dst2 ), "%s/%s", dir,  files[i].name );
++            mrc = ckpt_move_file( src2, dst2, dosync, err, sizeof( err ));
++        }
++        ckpt_clear_stage( wdir );
++        if (mrc < 0)
++        {
++            if (kind == 1) ck_valid = 0;
++            WRMSG( HHC02031, "E", dir, err );
++            CK_ENDED();
++            return -1;
++        }
++        ms_store = sr_ms_since( &t1 );
++    }
++    if (srfsize > ckpt_hint_srf) ckpt_hint_srf = srfsize;
++    if (kind == 2 && w.bytes > ckpt_hint_dlt) ckpt_hint_dlt = w.bytes;
++
+     /* 6. the manifest, last */
+     if (!(mf = fopen( man, "w" )))
+     {
+@@ -1082,8 +1254,8 @@ FILE        *mf;
+         fprintf( mf, "\n" );
+     fprintf( mf, " \"srf\":{\"file\":\"machine.srf\",\"size\":%"PRIu64",\"crc32\":\"%08X\",\"level\":%d},\n",
+              srfsize, srfcrc, level );
+-    fprintf( mf, " \"cpusStarted\":%d,\"pauseMs\":%d,\"stopMs\":%d,\"drainMs\":%d,\"hashMs\":%d,\"cckdMs\":%d,\"srfMs\":%d,\"crcMs\":%d,\n",
+-             started, ms_pause, ms_stop, ms_drain, ms_hash, ms_cckd, ms_srf, ms_crc );
++    fprintf( mf, " \"cpusStarted\":%d,\"pauseMs\":%d,\"stopMs\":%d,\"drainMs\":%d,\"hashMs\":%d,\"cckdMs\":%d,\"srfMs\":%d,\"crcMs\":%d,\"storeMs\":%d,\n",
++             started, ms_pause, ms_stop, ms_drain, ms_hash, ms_cckd, ms_srf, ms_crc, ms_store );
+     fprintf( mf, " \"shadows\":[" );
+     for (i = 0; i < nfiles; i++)
+     {
+@@ -1139,6 +1311,10 @@ FILE        *mf;
+     }
+     else
+         snprintf( kwhy, sizeof( kwhy ), "; crc %d ms", ms_crc );
++    {   /* ", store <ms> ms" at the end                */
++        size_t kl = strlen( kwhy );
++        snprintf( kwhy + kl, sizeof( kwhy ) - kl, ", store %d ms", ms_store );
++    }
+     WRMSG( HHC02030, "I", dir, ms_pause, ms_stop, ms_drain, ms_cckd, ms_srf,
+            srfsize, nfiles, shbytes, kwhy );
+     CK_ENDED();
+@@ -1152,6 +1328,8 @@ ckpt_fail:
+     if (kind != 2)
+         ck_valid = 0;
+     sr_start_cpus( mask );
++    if (staged)
++        ckpt_clear_stage( wdir );
+     // "CKPT: %s failed: %s; CPUs restarted"
+     WRMSG( HHC02031, "E", dir, why );
+     CK_ENDED();

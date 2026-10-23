@@ -1,0 +1,126 @@
+diff --git a/cpu.c b/cpu.c
+index 24e29e34..c6f4d9ca 100644
+--- a/cpu.c
++++ b/cpu.c
+@@ -2049,6 +2049,9 @@ int     aswitch;
+         DO_AUTOMATIC_TRACING();
+     }
+ 
++    /* An instruction that ended with RETURN_INTCHECK continues here */
++intcheck_resume:
++
+     /* Set `execflag' to 0 in case EXecuted instruction did a longjmp() */
+     regs->execflag = 0;
+ 
+@@ -2107,6 +2110,12 @@ enter_fastest_no_txf_loop:
+ 
+     /* Perform automatic instruction tracing if it's enabled */
+     DO_AUTOMATIC_TRACING();
++    /* Instruction ended with RETURN_INTCHECK? (see opcode.h) */
++    if (regs->intcheck)
++    {
++        regs->intcheck = 0;
++        goto intcheck_resume;
++    }
+     goto fastest_no_txf_loop;
+ 
+ #if defined( FEATURE_073_TRANSACT_EXEC_FACILITY )
+@@ -2144,6 +2153,12 @@ enter_txf_faster_loop:
+ 
+     /* Perform automatic instruction tracing if it's enabled */
+     DO_AUTOMATIC_TRACING();
++    /* Instruction ended with RETURN_INTCHECK? (see opcode.h) */
++    if (regs->intcheck)
++    {
++        regs->intcheck = 0;
++        goto intcheck_resume;
++    }
+ 
+ //txf_slower_loop:
+ 
+@@ -2178,6 +2193,12 @@ enter_txf_slower_loop:
+ 
+     /* Perform automatic instruction tracing if it's enabled */
+     DO_AUTOMATIC_TRACING();
++    /* Instruction ended with RETURN_INTCHECK? (see opcode.h) */
++    if (regs->intcheck)
++    {
++        regs->intcheck = 0;
++        goto intcheck_resume;
++    }
+     goto txf_facility_loop;
+ 
+ #endif /* defined( FEATURE_073_TRANSACT_EXEC_FACILITY ) */
+diff --git a/hstructs.h b/hstructs.h
+index 15ab0ec3..82429749 100644
+--- a/hstructs.h
++++ b/hstructs.h
+@@ -261,7 +261,8 @@ struct REGS {                           /* Processor registers       */
+                 hostint:1,              /* 1=Host generated interrupt*/
+                 host:1,                 /* REGS are hostregs         */
+                 guest:1,                /* REGS are guestregs        */
+-                diagnose:1;             /* Diagnose instr executing  */
++                diagnose:1,             /* Diagnose instr executing  */
++                intcheck:1;             /* 1=RETURN_INTCHECK done    */
+         unsigned int                    /* Flags (intlock serialized)*/
+                 dummy:1,                /* 1=Dummy regs structure    */
+                 configured:1,           /* 1=CPU is online           */
+diff --git a/inline.h b/inline.h
+index 5aee0a93..cbcf625c 100644
+--- a/inline.h
++++ b/inline.h
+@@ -823,7 +823,7 @@ static inline void ARCH_DEP( per1_gra )( REGS* regs )
+     RELEASE_INTLOCK( regs );
+ 
+     if (OPEN_IC_PER_GRA( regs ))
+-        RETURN_INTCHECK( regs );
++        RETURN_INTCHECK_LONGJMP( regs );
+ #endif
+ }
+ 
+@@ -877,7 +877,7 @@ inline void ARCH_DEP( per3_zero )( REGS* regs )
+         regs->peradr = regs->periaddr;
+         ON_IC_PER_ZEROADDR( regs );
+         if (OPEN_IC_PER_ZEROADDR( regs ))
+-            RETURN_INTCHECK( regs );
++            RETURN_INTCHECK_LONGJMP( regs );
+     }
+ #else
+     UNREFERENCED( regs );
+diff --git a/opcode.h b/opcode.h
+index 8b8e778c..fc6868cd 100644
+--- a/opcode.h
++++ b/opcode.h
+@@ -632,10 +632,31 @@ do { \
+ /*         Simple helper macro that instructions can use             */
+ /*         to force an immediate check for interrupts.               */
+ /*-------------------------------------------------------------------*/
++/* RETURN_INTCHECK may be used ONLY in the body of a DEF_INST        */
++/* instruction function: outside SIE mode it ends the instruction    */
++/* with a normal return. INVALIDATE_AIA makes the next               */
++/* UNROLLED_EXECUTE break out of the run_cpu loop, and the 'intcheck'*/
++/* flag makes run_cpu continue at the point where a longjmp(progjmp) */
++/* would have landed (execflag reset, then the interrupt check).     */
++/* This avoids a longjmp (a wasm exception throw, slow in some       */
++/* engines) for LPSW, SSM, STNSM, STOSM, SVC, LCTL and the others.   */
++/* Helper functions (not DEF_INST) use RETURN_INTCHECK_LONGJMP.      */
++/*-------------------------------------------------------------------*/
+ 
+-#define RETURN_INTCHECK(_regs)                                        \
++#define RETURN_INTCHECK_LONGJMP(_regs)                                \
+         longjmp((_regs)->progjmp, SIE_NO_INTERCEPT)
+ 
++#define RETURN_INTCHECK(_regs)                                        \
++  do                                                                  \
++  {                                                                   \
++    if (SIE_MODE( _regs ))                                            \
++        RETURN_INTCHECK_LONGJMP( _regs );                             \
++    INVALIDATE_AIA( _regs );                                          \
++    (_regs)->intcheck = 1;                                            \
++    return;                                                           \
++  }                                                                   \
++  while (0)
++
+ /*-------------------------------------------------------------------*/
+ /*                Instruction validity checking                      */
+ /*-------------------------------------------------------------------*/

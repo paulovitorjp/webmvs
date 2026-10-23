@@ -1,0 +1,209 @@
+# SPDX-License-Identifier: Apache-2.0
+# src/wasm/Makefile.wasm -- build SDL Hyperion as one static wasm32 binary.
+#
+# Usage (on the build host, after scripts/configure-wasm.sh made config.h in $(HERC)):
+#   source ~/emsdk/emsdk_env.sh
+#   make -f src/wasm/Makefile.wasm HERC=~/src/hyperion-wasm node -j16
+# scripts/build-wasm.sh does all steps on a clean tree.
+#
+# The source list is the explicit list from Hyperion Makefile.am (libhercs, libhercu,
+# libhercd, libherct, libherc), minus bootstrap.c (the main), hRexx* (Rexx is disabled),
+# dyngui/dyncrypt and the network/tape modules. panel.c and hconsole.c stay in the link:
+# impl.c, hdl.c and hsys.c reference panel_display although it is never called.
+# HDL modules are linked statically (patch 0004 + hdl_static.c); each module is compiled
+# with -D renames of the 6 HDL entry-point names. sockdev.c is compiled one time.
+
+HERC    ?= $(HOME)/src/hyperion-wasm
+EXT     ?= $(HOME)/ext-wasm
+WASMSRC ?= $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
+# WASMSOCK=1 (default): link the in-process TN3270 shim
+# (src/wasm/wasmsock.c, needs patch 0008 in $(HERC); scripts/build-wasm.sh applies it).
+# WASMSOCK=0: no 3270 at all, console listener stub (patch 0013 with -DWASM_NO_CONSOLE_LISTENER).
+WASMSOCK ?= 1
+ifeq ($(WASMSOCK),1)
+OBJ     ?= $(HOME)/build/wasm/obj
+OUT     ?= $(HOME)/build/wasm/out
+else
+OBJ     ?= $(HOME)/build/wasm/obj-nosock
+OUT     ?= $(HOME)/build/wasm/out-nosock
+endif
+OPT     ?= -O3
+
+CC      := emcc
+
+VERS_MAJ := $(shell $(HERC)/_dynamic_version $(HERC) VERS_MAJ)
+VERS_INT := $(shell $(HERC)/_dynamic_version $(HERC) VERS_INT)
+VERS_MIN := $(shell $(HERC)/_dynamic_version $(HERC) VERS_MIN)
+VERS_BLD := $(shell $(HERC)/_dynamic_version $(HERC) VERS_BLD)
+DYNAMIC_VERSION := $(shell $(HERC)/_dynamic_version $(HERC) VERSION)
+
+# Wasm EH + wasm SjLj on every object and at link time.
+EHFLAGS  := -fwasm-exceptions -sSUPPORT_LONGJMP=wasm
+CPPFLAGS := -DHAVE_CONFIG_H -D_GNU_SOURCE -DOPTION_NO_WATCHDOG -DOPTION_NO_SHARED_DEVICES \
+            -DPKGDATADIR=\"/usr/share/hercules\" -DMODULESDIR=\".\" -DHERC_LOCALEDIR=\"/usr/share/locale\" \
+            -DDYNAMIC_VERSION=\"$(DYNAMIC_VERSION)\" -DVERS_MAJ=$(VERS_MAJ) -DVERS_INT=$(VERS_INT) \
+            -DVERS_MIN=$(VERS_MIN) -DVERS_BLD=$(VERS_BLD) \
+            -I$(HERC) -I$(EXT)/include
+# Reproducible build: __DATE__/__TIME__/__TIMESTAMP__
+# (version.c HHC01415I, console.c HHC01027I, impl.c BDATE/BTIME, cgibin.c) come from SOURCE_DATE_EPOCH, which
+# clang honors. Default: the commit time of the Hyperion tree's HEAD (the pinned ee86c4d -> 1765106501 =
+# 2025-12-07 11:21:41 UTC). Give SOURCE_DATE_EPOCH=<seconds> in the environment to override it.
+SOURCE_DATE_EPOCH ?= $(shell git -C $(HERC) log -1 --format=%ct 2>/dev/null)
+ifneq ($(strip $(SOURCE_DATE_EPOCH)),)
+export SOURCE_DATE_EPOCH
+endif
+# -ffile-prefix-map: no host build paths in the binary (__FILE__ strings).
+CFLAGS   := $(OPT) -g0 -MMD -MP -pthread $(EHFLAGS) -sUSE_ZLIB=1 -sUSE_BZIP2=1 \
+            -ffile-prefix-map=$(HERC)/= -ffile-prefix-map=$(WASMSRC)= \
+            -Wall -W -Wno-unused-parameter -Wno-sign-compare -Wno-missing-field-initializers \
+            -Wno-unused-function -Wno-unused-but-set-variable -Wno-unknown-pragmas
+
+# --- core sources (Makefile.am) --------------------------------------------------------
+LIBHERCS := hsys.c
+LIBHERCU := codepage.c hdl.c hexdumpe.c hostinfo.c hscutl.c hsocket.c hthreads.c logger.c \
+            logmsg.c machdep.c memrchr.c parser.c pttrace.c version.c
+LIBHERCD := cache.c cckddasd.c cckdutil.c ckddasd.c cckddasd64.c cckdutil64.c ckddasd64.c \
+            dasdtab.c dasdutil.c fbadasd.c dasdutil64.c fbadasd64.c shared.c
+LIBHERCT := hetlib.c ftlib.c sllib.c
+# libherc minus hRexx.c hRexx_o.c hRexx_r.c (Rexx disabled); machdep.c is already in LIBHERCU.
+LIBHERC  := _archdep_templ.c archlvl.c assist.c bldcfg.c cgibin.c channel.c chsc.c clock.c \
+            cmdtab.c cmpsc_2012.c cmpscdbg.c cmpscdct.c cmpscget.c cmpscmem.c cmpscput.c \
+            config.c control.c cpu.c crypto.c dat.c decimal.c dfp.c diagmssf.c diagnose.c \
+            dyn76.c ecpsvm.c esame.c external.c facility.c fillfnam.c float.c general1.c \
+            general2.c general3.c hao.c hbyteswp.c hconsole.c hdiagf18.c history.c hsccmd.c \
+            hscemode.c hscloc.c hscmisc.c hscpufun.c httpserv.c ieee.c impl.c inline.c io.c \
+            ipl.c loadmem.c loadparm.c losc.c machchk.c nnpa.c opcode.c panel.c pfpo.c \
+            plo.c qdio.c scedasd.c scescsi.c script.c service.c sie.c skey.c sr.c stack.c \
+            strsignal.c tcpip.c timer.c trace.c transact.c vector.c vm.c vmd250.c vstore.c \
+            x75.c xstore.c zvector.c zvector2.c zvector3.c
+CORE_SRC := $(LIBHERCS) $(LIBHERCU) $(LIBHERCD) $(LIBHERCT) $(LIBHERC)
+CORE_OBJ := $(addprefix $(OBJ)/,$(CORE_SRC:.c=.o))
+
+# --- HDL modules: module name -> sources (sockdev.c is shared, compiled once) -----------
+MOD_hdteq    := hdteq.c
+MOD_hdt3270  := console.c
+MOD_hdt1052c := con1052c.c
+MOD_hdt3505  := cardrdr.c
+MOD_hdt1403  := printer.c
+MOD_hdt3525  := cardpch.c
+# WASMSOCK=0: console.c gets the temporary listener stub (patch 0013).
+# WASMSOCK=1 (default) clears CONSOLE_DEFS (the stub is then inactive).
+CONSOLE_DEFS ?= -DWASM_NO_CONSOLE_LISTENER
+MODDEFS_hdt3270 = $(CONSOLE_DEFS)
+MODULES      := hdteq hdt3270 hdt1052c hdt3505 hdt1403 hdt3525
+EP_NAMES     := hdl_check_depends_ep hdl_register_symbols_ep hdl_resolve_symbols_ep \
+                hdl_define_devtypes_ep hdl_define_instructs_ep hdl_on_module_unload_ep
+renames       = $(foreach e,$(EP_NAMES),-D$(e)=$(1)_$(e))
+MOD_OBJ      := $(foreach m,$(MODULES),$(addprefix $(OBJ)/mod/$(m)/,$(MOD_$(m):.c=.o))) \
+                $(OBJ)/sockdev.o
+
+WASM_OBJ := $(OBJ)/wasm/hdl_static.o $(OBJ)/wasm/wasm_main.o
+
+ifeq ($(WASMSOCK),1)
+CONSOLE_DEFS :=
+WASM_OBJ     += $(OBJ)/wasm/wasmsock.o
+CPPFLAGS     += -I$(WASMSRC)
+WASMSOCK_LD  := -sEXPORTED_FUNCTIONS=_main,_hw_term_open,_hw_term_open_port,_hw_term_input,_hw_term_read,_hw_term_close,_hw_term_state,_hw_term_out_seq,_hw_term_out_avail,_hw_term_in_space,_hw_term_buf,_hw_term_buf_size \
+                -sEXPORTED_RUNTIME_METHODS=HEAPU8
+endif
+
+ALL_OBJ  := $(CORE_OBJ) $(MOD_OBJ) $(WASM_OBJ)
+
+# --- link ------------------------------------------------------------------------------
+POOL    ?= 24
+# MEM: INITIAL_MEMORY (fixed, no growth). STRICT: PTHREAD_POOL_SIZE_STRICT; with -sPROXY_TO_PTHREAD
+# emsdk 6.0.13 (tools/link.py:1533) silently sets it to 0, so it has no effect in these builds.
+MEM     ?= 512MB
+STRICT  ?= 1
+# GROW=1: -sALLOW_MEMORY_GROWTH=1 up to MAXMEM (MEM is then the start size). Default 0: fixed MEM.
+GROW    ?= 0
+MAXMEM  ?= 1GB
+# LDEXTRA: extra link flags, e.g. --profiling-funcs (function names in stack traces and --cpu-prof)
+LDEXTRA ?=
+LDFLAGS_COMMON = $(OPT) -pthread $(EHFLAGS) -sPROXY_TO_PTHREAD -sPTHREAD_POOL_SIZE=$(POOL) \
+            -sPTHREAD_POOL_SIZE_STRICT=$(STRICT) -sINITIAL_MEMORY=$(MEM) -sALLOW_MEMORY_GROWTH=$(GROW) $(if $(filter 1,$(GROW)),-sMAXIMUM_MEMORY=$(MAXMEM)) \
+            -sSTACK_SIZE=2MB -sDEFAULT_PTHREAD_STACK_SIZE=1MB -sUSE_ZLIB=1 -sUSE_BZIP2=1 \
+            -L$(EXT)/lib -lcrypto32 -ldecNumber32 -lSoftFloat32 -ltelnet32
+LDFLAGS_NODE := -sNODERAWFS -sENVIRONMENT=node -sEXIT_RUNTIME=1
+
+# --- browser build: make -f src/wasm/Makefile.wasm web ------------------
+# ES6 module factory createHercules() in $(WEBOUT)/hercules.js (+ hercules.wasm); loaded by
+# web/runtime/mvs-runtime.js. WasmFS (default memory backend): file syscalls run in the calling
+# worker (the legacy FS proxies every syscall to the browser main thread under pthreads).
+# The DASD files are fetched inside a worker (library_webload.js) before impl().
+# WEBMEM: heap size. Eager layout (all volumes in the heap): measured high-water (sbrk) 154 MiB + 30% = 200MB.
+# WEBSTRICT: note that emsdk 6.0.13 tools/link.py:1533 forces PTHREAD_POOL_SIZE_STRICT=0 when
+# PROXY_TO_PTHREAD is set (an exhausted pool then makes a new Worker on demand), so the value
+# has no effect here. The pool check is a Worker count: mvs-runtime.js stats().workersCreated.
+WEBOUT    ?= $(OUT)/web
+# the base volumes are no longer in the heap (lazy chunks, in-heap LRU 24 MiB). Measured sbrk
+# peak: 64-68 MB in normal runs, 86.9 MB in the LRU stress run (?dasd.prefetchAll=1: LRU full, 420 evictions);
+# 112MB = stress peak + 35% (lazy layout). The eager layout needed 200MB (83.5 MB DASD in WasmFS memory).
+WEBMEM    ?= 112MB
+WEBSTRICT ?= 2
+# WEBGROW / WEBMAXMEM: memory growth for the browser build (GROW / MAXMEM above). Default off (fixed WEBMEM).
+# The eager dev bundle (manifest format 1: all base volumes in the heap) needs WEBMEM=200MB or more.
+WEBGROW   ?= 0
+WEBMAXMEM ?= 1GB
+LAZY_EXPORTS := _hw_outsink_statd,_hw_lazy_statd,_hw_lazy_trace_buf,_hw_lazy_trace_len,_hw_lazy_vol_count,_hw_lazy_vol_devnum,_hw_log_note
+WEB_EXPORTS := _main,_malloc,_free,_hw_term_open,_hw_term_open_port,_hw_term_input,_hw_term_read,_hw_term_close,_hw_term_state,_hw_term_out_seq,_hw_term_out_avail,_hw_term_in_space,_hw_term_buf,_hw_term_buf_size,_hw_log_read,_hw_log_buf,_hw_log_buf_size,_hw_log_dropped,_hw_command,_hw_cmd_buf,_hw_cmd_buf_size,_hw_stat,_hw_phase,_hw_load_bytes,_hw_load_total,_hw_load_files,_hw_load_progress,_hw_load_finish,_hw_fs_create,_hw_fs_pwrite,_hw_fs_close,_hw_fs_mkdirs,_hw_fs_chmod,_hw_cckd_flush,_hw_cckd_devnum,_hw_cckd_wrthru,$(LAZY_EXPORTS)
+# lazy chunked CCKD base volumes = a WasmFS backend (lazydasd.cpp, C++ against the
+# WasmFS internal headers of the pinned emsdk) + the DASD I/O worker (library_lazydasd.js).
+# outsink.cpp = bounded WasmFS backend for the output device dirs (printers, punches).
+EMROOT   ?= $(patsubst %/,%,$(dir $(shell which emcc)))
+LAZY_CXXFLAGS := $(OPT) -g0 -MMD -MP -pthread -std=c++17 -fno-exceptions -I$(EMROOT)/system/lib/wasmfs \
+            -I$(EMROOT)/system/lib/pthread -ffile-prefix-map=$(WASMSRC)= -ffile-prefix-map=$(EMROOT)/= -Wall
+LDFLAGS_WEB := -sWASMFS -sENVIRONMENT=web,worker -sMODULARIZE -sEXPORT_ES6 -sEXPORT_NAME=createHercules \
+            -sEXIT_RUNTIME=0 -sALLOW_BLOCKING_ON_MAIN_THREAD=0 --js-library $(WASMSRC)library_lazydasd.js \
+            --js-library $(WASMSRC)library_webload.js \
+            -sEXPORTED_FUNCTIONS=$(WEB_EXPORTS) -sEXPORTED_RUNTIME_METHODS=HEAPU8
+WEB_OBJ  := $(CORE_OBJ) $(MOD_OBJ) $(OBJ)/wasm/hdl_static.o $(OBJ)/wasm/wasmsock.o \
+            $(OBJ)/wasm-web/wasm_main.o $(OBJ)/wasm-web/webrt.o $(OBJ)/wasm-web/lazydasd.o $(OBJ)/wasm-web/outsink.o
+
+.PHONY: node web clean objs
+node: $(OUT)/hercules.js
+web: $(WEBOUT)/hercules.js
+
+$(WEBOUT)/hercules.js: MEM := $(WEBMEM)
+$(WEBOUT)/hercules.js: STRICT := $(WEBSTRICT)
+$(WEBOUT)/hercules.js: GROW := $(WEBGROW)
+$(WEBOUT)/hercules.js: MAXMEM := $(WEBMAXMEM)
+$(WEBOUT)/hercules.js: $(WEB_OBJ) $(WASMSRC)library_webload.js $(WASMSRC)library_lazydasd.js
+	@test "$(WASMSOCK)" = 1 || { echo "web needs WASMSOCK=1"; exit 1; }
+	@mkdir -p $(WEBOUT)
+	$(CC) -o $@ $(WEB_OBJ) $(LDFLAGS_COMMON) $(LDFLAGS_WEB) $(LDEXTRA)
+
+$(OBJ)/wasm-web/%.o: $(WASMSRC)%.cpp
+	@mkdir -p $(dir $@)
+	em++ $(LAZY_CXXFLAGS) -c $< -o $@
+
+$(OBJ)/wasm-web/%.o: $(WASMSRC)%.c $(HERC)/config.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) -DHW_WEB $(CFLAGS) -c $< -o $@
+
+objs: $(ALL_OBJ)
+
+$(OUT)/hercules.js: $(ALL_OBJ)
+	@mkdir -p $(OUT)
+	$(CC) -o $@ $(ALL_OBJ) $(LDFLAGS_COMMON) $(LDFLAGS_NODE) $(WASMSOCK_LD) $(LDEXTRA)
+
+$(OBJ)/%.o: $(HERC)/%.c $(HERC)/config.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+
+define MODRULE
+$(OBJ)/mod/$(1)/%.o: $(HERC)/%.c $(HERC)/config.h
+	@mkdir -p $$(dir $$@)
+	$$(CC) $$(CPPFLAGS) $(call renames,$(1)) $$(MODDEFS_$(1)) $$(CFLAGS) -c $$< -o $$@
+endef
+$(foreach m,$(MODULES),$(eval $(call MODRULE,$(m))))
+
+$(OBJ)/wasm/%.o: $(WASMSRC)%.c $(HERC)/config.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+
+clean:
+	rm -rf $(OBJ) $(OUT)
+
+# header dependencies (-MMD -MP)
+-include $(ALL_OBJ:.o=.d) $(OBJ)/wasm-web/wasm_main.d $(OBJ)/wasm-web/webrt.d $(OBJ)/wasm-web/lazydasd.d $(OBJ)/wasm-web/outsink.d

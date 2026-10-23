@@ -1,0 +1,128 @@
+diff --git a/console.c b/console.c
+index da9201be..72635053 100644
+--- a/console.c
++++ b/console.c
+@@ -33,6 +33,10 @@
+ /*                                                                   */
+ /*-------------------------------------------------------------------*/
+ 
++/* With USE_WASMSOCK (default under Emscripten), map this             */
++/* file's socket calls to the in-process vsock shim (hsocket.h).     */
++#define WASMSOCK_MAP_SOCKETS
++
+ #include "hstdinc.h"
+ #include "hercules.h"
+ #include "hexterns.h"
+diff --git a/hmacros.h b/hmacros.h
+index 554f0338..32be62fc 100644
+--- a/hmacros.h
++++ b/hmacros.h
+@@ -804,12 +804,63 @@ typedef int CMPFUNC(const void*, const void*);
+     while(0)
+ 
+ 
+-#define SUPPORT_WAKEUP_CONSOLE_SELECT_VIA_PIPE( maxfd, prset )  SUPPORT_WAKEUP_SELECT_VIA_PIPE( sysblk.cnslrpipe, (maxfd), (prset) )
+-#define SUPPORT_WAKEUP_SOCKDEV_SELECT_VIA_PIPE( maxfd, prset )  SUPPORT_WAKEUP_SELECT_VIA_PIPE( sysblk.sockrpipe, (maxfd), (prset) )
++/*-------------------------------------------------------------------*/
++/* USE_WASMSOCK (src/wasm/wasmsock.c): the console thread             */
++/* is woken by the vsock doorbell instead of the cnslrpipe pipe.      */
++/* sysblk.cnslpipe_flag keeps its meaning ("signal pending"); vsock   */
++/* pselect treats flag > 0 like a readable wake-up pipe.              */
++/* On by default under Emscripten (define NO_WASMSOCK to disable).    */
++/*-------------------------------------------------------------------*/
++#if defined( __EMSCRIPTEN__ ) && !defined( NO_WASMSOCK ) && !defined( USE_WASMSOCK )
++  #define USE_WASMSOCK  1
++#endif
++
++#if defined( USE_WASMSOCK )
++
++extern void vsock_doorbell_ring( void );
++extern void vsock_select_watch_flag( volatile int* flag );
++
++#define SUPPORT_WAKEUP_CONSOLE_SELECT_VIA_PIPE( maxfd, prset )      \
++                                                                    \
++    vsock_select_watch_flag( &sysblk.cnslpipe_flag )
++
++#define RECV_CONSOLE_THREAD_PIPE_SIGNAL()                           \
++                                                                    \
++    do                                                              \
++    {                                                               \
++        obtain_lock( &sysblk.cnslpipe_lock );                       \
++        sysblk.cnslpipe_flag = 0;                                   \
++        release_lock( &sysblk.cnslpipe_lock );                      \
++    }                                                               \
++    while(0)
+ 
++#define SIGNAL_CONSOLE_THREAD()                                     \
++                                                                    \
++    do                                                              \
++    {                                                               \
++        int f, saved_errno = get_HSO_errno();                       \
++        obtain_lock( &sysblk.cnslpipe_lock );                       \
++        {                                                           \
++            if ((f = sysblk.cnslpipe_flag) <= 0)                    \
++                     sysblk.cnslpipe_flag   = 1;                    \
++        }                                                           \
++        release_lock( &sysblk.cnslpipe_lock );                      \
++        if (f <= 0)                                                 \
++            vsock_doorbell_ring();                                  \
++        set_HSO_errno( saved_errno );                               \
++    }                                                               \
++    while(0)
++
++#else // !defined( USE_WASMSOCK )
++
++#define SUPPORT_WAKEUP_CONSOLE_SELECT_VIA_PIPE( maxfd, prset )  SUPPORT_WAKEUP_SELECT_VIA_PIPE( sysblk.cnslrpipe, (maxfd), (prset) )
+ #define RECV_CONSOLE_THREAD_PIPE_SIGNAL()  RECV_PIPE_SIGNAL( sysblk.cnslrpipe, sysblk.cnslpipe_lock, sysblk.cnslpipe_flag )
+-#define RECV_SOCKDEV_THREAD_PIPE_SIGNAL()  RECV_PIPE_SIGNAL( sysblk.sockrpipe, sysblk.sockpipe_lock, sysblk.sockpipe_flag )
+ #define SIGNAL_CONSOLE_THREAD()            SEND_PIPE_SIGNAL( sysblk.cnslwpipe, sysblk.cnslpipe_lock, sysblk.cnslpipe_flag )
++
++#endif // defined( USE_WASMSOCK )
++
++#define SUPPORT_WAKEUP_SOCKDEV_SELECT_VIA_PIPE( maxfd, prset )  SUPPORT_WAKEUP_SELECT_VIA_PIPE( sysblk.sockrpipe, (maxfd), (prset) )
++#define RECV_SOCKDEV_THREAD_PIPE_SIGNAL()  RECV_PIPE_SIGNAL( sysblk.sockrpipe, sysblk.sockpipe_lock, sysblk.sockpipe_flag )
+ #define SIGNAL_SOCKDEV_THREAD()            SEND_PIPE_SIGNAL( sysblk.sockwpipe, sysblk.sockpipe_lock, sysblk.sockpipe_flag )
+ 
+ /*********************************************************************/
+diff --git a/hsocket.h b/hsocket.h
+index a76bba42..ac913aae 100644
+--- a/hsocket.h
++++ b/hsocket.h
+@@ -147,4 +147,37 @@ HSOCK_DLL_IMPORT int read_socket(int fd, void *ptr, int nbytes);
+ HSOCK_DLL_IMPORT int write_socket(int fd, const void *ptr, int nbytes);
+ HSOCK_DLL_IMPORT int disable_nagle(int fd);
+ 
++/*-------------------------------------------------------------------*/
++/* In-process TN3270 loopback (src/wasm/wasmsock.c).                 */
++/* A source file that defines WASMSOCK_MAP_SOCKETS before it         */
++/* includes hercules.h (only console.c) gets its socket calls mapped */
++/* to the vsock_* shim when USE_WASMSOCK is on (see hmacros.h).      */
++/*-------------------------------------------------------------------*/
++#if defined( USE_WASMSOCK ) && defined( WASMSOCK_MAP_SOCKETS )
++
++#include "wasmsock.h"
++
++#define socket( d, t, p )               vsock_socket( (d), (t), (p) )
++#define setsockopt( f, l, n, v, s )     vsock_setsockopt( (f), (l), (n), (v), (s) )
++#define bind( f, a, l )                 vsock_bind( (f), (a), (l) )
++#define listen( f, b )                  vsock_listen( (f), (b) )
++#define accept( f, a, l )               vsock_accept( (f), (a), (l) )
++#define recv( f, b, n, fl )             vsock_recv( (f), (b), (n), (fl) )
++#define send( f, b, n, fl )             vsock_send( (f), (b), (n), (fl) )
++#define getpeername( f, a, l )          vsock_getpeername( (f), (a), (l) )
++#define getsockname( f, a, l )          vsock_getsockname( (f), (a), (l) )
++#define pselect( n, r, w, e, t, m )     vsock_pselect( (n), (r), (w), (e), (t), (m) )
++#define select( n, r, w, e, t )         vsock_select( (n), (r), (w), (e), (t) )
++#define shutdown( f, h )                vsock_shutdown( (f), (h) )
++#define read_socket( f, b, n )          vsock_read_socket( (f), (b), (n) )
++#define write_socket( f, b, n )         vsock_write_socket( (f), (b), (n) )
++#define disable_nagle( f )              vsock_disable_nagle( (f) )
++#define socket_set_blocking_mode( f, m ) vsock_set_blocking_mode( (f), (m) )
++#define set_socket_keepalive( f, i, v, c ) vsock_set_keepalive( (f), (i), (v), (c) )
++#define telnet_closesocket              vsock_close   /* object-like: telnet.h declares it later */
++#undef  close_socket
++#define close_socket( f )               vsock_close( (f) )
++
++#endif /* USE_WASMSOCK && WASMSOCK_MAP_SOCKETS */
++
+ #endif /*!defined(_HSOCKET_H)*/

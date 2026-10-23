@@ -1,0 +1,65 @@
+# Publish the prebuilt bundle to GitHub Pages. Nothing is built on GitHub: scripts/bundle.sh --tar makes
+# dist-<build>.tar.gz (+ .sha256) on the build host (docs/DEPLOY.md, "GitHub Pages").
+# Repository settings: Settings > Pages > Build and deployment > Source = "GitHub Actions".
+#
+# Run it by hand (Actions > "Deploy to GitHub Pages" > Run workflow), with one of:
+#   release = the tag of a GitHub Release that has the two assets dist-<build>.tar.gz and
+#             dist-<build>.tar.gz.sha256 (recommended: the 60 MB bundle never enters the git history)
+#   release empty = deploy the dist/ directory of the selected branch (if you commit dist/ to the repo)
+name: Deploy to GitHub Pages
+
+on:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: 'Release tag with dist-<build>.tar.gz + .sha256 (empty: use dist/ from the branch)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# one deployment at a time; a newer run waits, a running deployment is not cancelled
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Checkout (only when dist/ comes from the branch)
+        if: inputs.release == ''
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1   # v7.0.1
+      - name: Download the prebuilt bundle from the release
+        if: inputs.release != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.release }}
+        run: |
+          mkdir -p in dist
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir in --pattern 'dist-*.tar.gz' --pattern 'dist-*.tar.gz.sha256'
+          ls -l in
+          test "$(ls in/*.tar.gz | wc -l)" = 1 || { echo "need exactly one dist-*.tar.gz asset"; exit 1; }
+          ( cd in && sha256sum -c ./*.sha256 )
+          tar -xzf in/*.tar.gz -C dist
+      - name: Check the bundle
+        run: |
+          for f in index.html entry.json coi-serviceworker.js .nojekyll; do test -e "dist/$f" || { echo "missing dist/$f"; exit 1; }; done
+          echo "build $(jq -r .build dist/entry.json): $(find dist -type f | wc -l) files, $(du -sb dist | cut -f1) bytes"
+          big=$(find dist -type f -size +100M); test -z "$big" || { echo "files over 100 MB: $big"; exit 1; }
+          test "$(du -sb dist | cut -f1)" -lt 1000000000 || { echo "site over 1 GB"; exit 1; }
+      - name: Configure Pages
+        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d   # v6.0.0
+      - name: Upload dist/ as the Pages artifact
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9   # v5.0.0
+        with:
+          path: dist
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346   # v5.0.1

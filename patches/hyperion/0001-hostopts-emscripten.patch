@@ -1,0 +1,45 @@
+diff --git a/hostopts.h b/hostopts.h
+index 501dfa7f..7595d504 100644
+--- a/hostopts.h
++++ b/hostopts.h
+@@ -311,6 +311,40 @@
+                                            const for struct dirent   */
+ 
+ 
++/*-------------------------------------------------------------------*/
++/* Hard-coded Emscripten (WebAssembly) features and options...       */
++/*-------------------------------------------------------------------*/
++#elif defined(__EMSCRIPTEN__)           /* wasm32 (webmvs build)     */
++
++/* Emscripten defines __unix__ but not __linux__. Based on the Linux */
++/* block below: no fork (sh command), no SCSI tape, no FBA block     */
++/* devices, no mlock, and a small fixed device-thread limit (each    */
++/* thread is a Web Worker from a fixed-size pool).                   */
++
++#define DLL_IMPORT              extern
++#define DLL_EXPORT
++#define INL_DLL_IMPORT
++#define INL_DLL_EXPORT          extern
++#undef  TUNTAP_IFF_RUNNING_NEEDED       /* (no tuntap)               */
++#undef  OPTION_SCSI_TAPE                /* (NO SCSI tape support)    */
++#undef  OPTION_SCSI_ERASE_TAPE          /* (NOT supported)           */
++#undef  OPTION_SCSI_ERASE_GAP           /* (NOT supported)           */
++#undef  OPTION_FBA_BLKDEVICE            /* (no FBA BLKDEVICE support)*/
++#define MAX_DEVICE_THREADS          4   /* (worker pool is fixed)    */
++#define MIXEDCASE_FILENAMES_ARE_UNIQUE  /* ("Foo" and "fOo" unique)  */
++#undef  HAVE_FORK                       /* (no processes)            */
++#undef  HAVE_MLOCKALL                   /* (no-op in wasm)           */
++#undef  HAVE_MLOCK                      /* (no-op in wasm)           */
++#undef  HAVE_BASIC_KEEPALIVE            /* configure finds the TCP   */
++#undef  HAVE_PARTIAL_KEEPALIVE          /* keepalive symbols, but    */
++#undef  HAVE_FULL_KEEPALIVE             /* setsockopt gives ENOPROTOOPT */
++#define HOW_TO_IMPLEMENT_SH_COMMAND       USE_ANSI_SYSTEM_API_FOR_SH_COMMAND
++#define SET_CONSOLE_CURSOR_SHAPE_METHOD   CURSOR_SHAPE_NOT_SUPPORTED
++#undef  OPTION_EXTCURS                  /* Normal cursor handling    */
++#define SCANDIR_CONST_STRUCT_DIRENT     /* define if scandir uses
++                                           const for struct dirent   */
++
++
+ /*-------------------------------------------------------------------*/
+ /* Hard-coded GNU Linux-specific features and options...             */
+ /*-------------------------------------------------------------------*/

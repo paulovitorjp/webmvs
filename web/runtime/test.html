@@ -1,0 +1,165 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<html lang="en">
+<meta charset="utf-8">
+<title>mvs-runtime test</title>
+<!-- Bare test page for web/runtime/mvs-runtime.js. No UI: it boots MVS,
+     drives the 0010 master console and one TSO terminal with the headless TN3270 client, and
+     reports with console.log lines that web/runtime/run-test.mjs (Playwright) collects:
+       STATE <state> <json>   LOG <hercules log line>   SCREEN <dev> <json text>   RESULT <json>
+     Query: ?tso=0 (no TSO logon), ?shutdown=1 (clean MVS shutdown at the end),
+            ?console=0 (no 0010 terminal: NIP on 009, HAO answers), ?verify=0 (no sha256),
+            ?coi=1 (load coi-serviceworker.js first; for hosts without COOP/COEP headers) -->
+<script>
+  if (new URLSearchParams(location.search).get('coi') === '1') document.write('<script src="coi-serviceworker.js"><\/script>');
+</script>
+<pre id="out">starting</pre>
+<script type="module">
+import { createRuntime } from './mvs-runtime.js';
+import { HeadlessTerminal } from './tn3270-headless.js';
+
+const q = new URLSearchParams(location.search);
+const want = (k, d) => (q.has(k) ? q.get(k) !== '0' : d);
+// coi-serviceworker: the first load registers the service worker and reloads the page.
+if (want('coi', false) && !crossOriginIsolated) { console.log('COI not isolated yet; waiting for the service worker reload'); await new Promise(() => {}); }
+const T0 = performance.now();
+const ms = () => Math.round(performance.now() - T0);
+const out = document.getElementById('out');
+const say = (s) => { console.log(s); out.textContent = s.slice(0, 200); };
+const result = { ok: false, crossOriginIsolated, userAgent: navigator.userAgent, hardwareConcurrency: navigator.hardwareConcurrency, t: {} };
+const mark = (k) => { if (result.t[k] == null) result.t[k] = ms(); };
+
+let longest = 0, longCount = 0;
+try {
+  new PerformanceObserver((l) => { for (const e of l.getEntries()) { longCount++; longest = Math.max(longest, e.duration); } })
+    .observe({ type: 'longtask', buffered: true });
+  result.longtaskSupported = true;
+} catch { result.longtaskSupported = false; }
+
+function screenLogger(dev, term) {
+  let last = '', timer = 0;
+  term.onScreen(() => { clearTimeout(timer); timer = setTimeout(() => {
+    const t = term.text(); if (t !== last) { last = t; console.log(`SCREEN ${dev} +${ms()} ${JSON.stringify(t.replace(/\n+$/, ''))}`); } }, 150); });
+}
+
+async function finish(ok, err) {
+  result.ok = ok; if (err) result.error = String(err && err.stack || err);
+  result.stats = rt.stats();
+  result.longtask = { count: longCount, maxMs: Math.round(longest) };
+  if (performance.measureUserAgentSpecificMemory) {
+    try { const m = await performance.measureUserAgentSpecificMemory(); result.uaMemoryBytes = m.bytes; } catch (e) { result.uaMemoryError = String(e); }
+  }
+  if (performance.memory) result.jsHeap = { used: performance.memory.usedJSHeapSize, total: performance.memory.totalJSHeapSize };
+  console.log('RESULT ' + JSON.stringify(result));
+  say(`done ok=${ok}`);
+}
+
+const hex = (b) => Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
+function traced(dev, c) {     // ?trace=1: raw bytes in both directions (hex)
+  if (!want('trace', false)) return c;
+  c.onData((b) => console.log(`RAW ${dev} < +${ms()} ${hex(b)}`));
+  const w0 = c.write;
+  return { ...c, write: (b) => { console.log(`RAW ${dev} > +${ms()} ${hex(b)}`); w0(b); } };
+}
+const typeOrFail = (term, s) => { if (!term.type(s)) throw new Error(`type(${s}) rejected at cursor ${term.screen.cursor}:\n${term.text()}`); };
+const rt = want('compat', false) ? null : createRuntime({ verify: want('verify', true), poolSize: Number(q.get('pool') || 24) });
+window.rt = rt;
+if (rt) rt.onLog((l) => console.log('LOG ' + l));
+if (rt) rt.onState((s, info) => {
+  console.log(`STATE ${s} +${ms()} ${JSON.stringify(info)}`);
+  if (s === 'loading' && info.loadMs != null) { mark('loaded'); result.load = info; }
+  if (s === 'ipl') mark('ipl');
+  if (s === 'ready') { mark('ready'); result.readyInfo = info; }
+  if (s === 'error') finish(false, info.error);
+});
+
+let con = null;
+if (rt && want('console', true)) {
+  con = new HeadlessTerminal(traced('0010', rt.openTerminal('IBM-3278-2-E@0010')), 'IBM-3278-2-E@0010');
+  if (want('trace', false)) rt.onInject((t, b) => console.log(`RAW 0010 >inject +${ms()} ${hex(b)}`));
+  screenLogger('0010', con);
+  con.onScreen(() => { const t = con.text(); if (/IEA101A/.test(t)) mark('iea101aOn0010'); if (/IKT007I/.test(t)) mark('ikt007iOn0010'); });
+}
+
+// Send an action, then wait until the host wrote the screen again and it is stable for 400 ms.
+async function act(term, f) {
+  const w = term.screen.writes; f();
+  await term.waitFor(() => term.screen.writes > w, 60000);
+  for (let n = term.screen.writes; ; n = term.screen.writes) { await new Promise((r) => setTimeout(r, 400)); if (term.screen.writes === n) break; }
+  return term.text();
+}
+
+async function tsoLogon() {
+  const tso = new HeadlessTerminal(traced('TSO', rt.openTerminal('IBM-3278-2-E')), 'IBM-3278-2-E');
+  screenLogger('TSO', tso);
+  await tso.waitFor(/CLEAR the screen|TSO Logon|Hercules Version/, 60000);
+  mark('tsoLogo');
+  let s = tso.text();
+  if (!/TSO Logon ===>/.test(s)) s = await act(tso, () => tso.clear());
+  if (!/TSO Logon ===>/.test(s)) s = await tso.waitFor(/TSO Logon ===>/, 30000);
+  s = await act(tso, () => { typeOrFail(tso, 'logon mvsce02'); tso.enter(); });
+  let pw = false;
+  for (let i = 0; i < 30 && !/READY *$/m.test(s); i++) {
+    if (/IN USE|REJECTED|INVALID|NOT AUTHORIZED/.test(s)) throw new Error('logon rejected:\n' + s);
+    if (!pw && /ENTER CURRENT PASSWORD/.test(s)) { pw = true; s = await act(tso, () => { typeOrFail(tso, 'PASS4U'); tso.enter(); }); }
+    else if (/OPTION *===>|Option *===>|COMMAND *===>/.test(s)) s = await act(tso, () => { tso.type('=X'); tso.enter(); });
+    else if (/\*\*\* *$/m.test(s)) s = await act(tso, () => tso.enter());
+    else s = await tso.waitFor((t) => t !== s, 60000);
+  }
+  if (!/READY *$/m.test(s)) throw new Error('no READY:\n' + s);
+  mark('tsoReady');
+  await act(tso, () => tso.clear());
+  s = await act(tso, () => { typeOrFail(tso, 'time'); tso.enter(); });
+  if (!/TIME-\d\d:\d\d:\d\d/.test(s)) s = await tso.waitFor(/TIME-\d\d:\d\d:\d\d/, 60000);
+  result.tsoTime = (s.match(/.*TIME-\d\d:\d\d:\d\d.*/) || [''])[0].trim();
+  mark('tsoTime');
+  await act(tso, () => tso.clear());
+  s = await act(tso, () => { typeOrFail(tso, 'logoff'); tso.enter(); });
+  if (!/LOGGED OFF|TSO Logon|CLEAR the screen/.test(s)) await tso.waitFor(/LOGGED OFF|TSO Logon|CLEAR the screen/, 30000);
+  mark('tsoLogoff');
+  tso.close();
+}
+
+// ?compat=1: the web/app contract: createRuntime({onProgress, debug}) -> Promise; the PAGE opens
+// 0010 (no ttype argument), waits for the logo, calls ipl(), answers IEA101A, waits for IKT007I.
+async function compatRun() {
+  mark('start');
+  const prog = [];
+  const r2 = await createRuntime({ onProgress: (p) => { prog.push(p.phase); console.log('PROGRESS ' + JSON.stringify(p)); }, debug: true });
+  window.rt2 = r2;
+  mark('loaded');
+  r2.onLog((l) => console.log('LOG ' + l));
+  const c = new HeadlessTerminal(traced('0010', r2.openTerminal()), 'IBM-3278-2-E@0010');
+  screenLogger('0010', c);
+  await c.waitFor(/CLEAR the screen|Hercules Version/, 15000);
+  mark('logo');
+  r2.ipl(); mark('ipl');
+  await c.waitFor(/IEA101A/, 60000); mark('iea101aOn0010');
+  await new Promise((r) => setTimeout(r, 300)); c.enter();                 // the page answers like an operator
+  const ikt = new Promise((res) => r2.onLog((l) => { if (/IKT007I/.test(l)) res(); }));
+  await ikt; mark('ready');
+  result.progressPhases = [...new Set(prog)];
+  result.stats = r2.stats();
+  result.ok = true;
+  result.longtask = { count: longCount, maxMs: Math.round(longest) };
+  console.log('RESULT ' + JSON.stringify(result));
+}
+if (want('compat', false)) { try { await compatRun(); } catch (e) { result.error = String(e.stack || e); console.log('RESULT ' + JSON.stringify(result)); } await new Promise(() => {}); }
+
+try {
+  mark('start');
+  await rt.start();
+  mark('module');
+  await rt.waitState('ready', 900000);
+  if (con) result.consoleScreenAtReady = con.text();
+  if (want('tso', true)) await tsoLogon();
+  if (con) {   // an operator command typed on the master console, answered there
+    rt.consoleCommand('D T');
+    await con.waitFor(/IEE136I/, 30000).then(() => mark('dtOn0010'), () => {});
+    result.consoleAfterDT = con.text();
+  }
+  if (want('shutdown', false)) { await rt.shutdown(); mark('stopped'); }
+  await finish(true);
+} catch (e) { await finish(false, e); }
+</script>
+</html>

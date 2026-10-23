@@ -1,0 +1,33 @@
+# Sample Caddy site for the MVS 3.8J bundle (scripts/bundle.sh --precompress -> dist/). See docs/DEPLOY.md.
+# Tested with Caddy 2.11.7 on 127.0.0.1 by an internal (unpublished) test script (with "http://127.0.0.1:8406" as the address).
+# Caddy gets a TLS certificate by itself for a public name (HTTPS is needed: SharedArrayBuffer and the
+# service worker need a secure context). Range requests work by default (the page does not need them).
+mvs.example.org {
+	root * /srv/mvs/dist
+
+	header {
+		Cross-Origin-Opener-Policy same-origin
+		Cross-Origin-Embedder-Policy require-corp
+		Cross-Origin-Resource-Policy same-origin
+		X-Content-Type-Options nosniff
+	}
+	# content-hashed dirs: never change; everything else (index.html, entry.json, coi-serviceworker.js,
+	# licenses, source) is revalidated on every load
+	@hashed path /assets/* /runtime/* /conf/* /boot/* /dasd/*
+	header @hashed Cache-Control "public, max-age=31536000, immutable"
+	@entry not path /assets/* /runtime/* /conf/* /boot/* /dasd/*
+	header @entry Cache-Control "no-cache"
+
+	@other path /_headers /.nojekyll
+	respond @other 404
+
+	# <file>.br / <file>.gz from bundle.sh --precompress; on-the-fly compression for the rest
+	encode zstd gzip
+	file_server {
+		precompressed br gzip
+	}
+	handle_errors {
+		rewrite * /404.html
+		file_server
+	}
+}

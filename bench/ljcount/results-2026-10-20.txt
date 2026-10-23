@@ -1,0 +1,311 @@
+# Perf results (2026-10-20 UTC).
+
+## analyze.py nljc1 (bench/ljcount/analyze.py nljc1-ljcount.log nljc1-phases.txt)
+snapshots: 317 from 1792460447.782 to 1792460725.923
+phase    dur_s   MIPS    lj/s   lj/Minst  node_ns/lj  busy%  node_lj%busy  FF_ms/s  FF%wall  FF%busy*
+ipl       2.70   22.60    78249    3462.7         56   56.9        0.76    351.3   35.13    38.34
+idle1    10.00    0.74     6446    8762.9         55   43.4        0.08     28.9    2.89     6.25
+tso       4.92    4.93    44336    8996.4         52   34.1        0.67    199.1   19.91    37.03
+idle2    10.00    0.48     3639    7592.2         60   15.0        0.15     16.3    1.63     9.82
+job       7.57  154.38     1413       9.1         53   97.4        0.01      6.3    0.63     0.65
+
+[ipl] longjmps 211273; top sites:
+   control.c:7613              79377  37.6%
+   control.c:2371              56483  26.7%
+   control.c:7671              42174  20.0%
+   general2.c:1749             18797   8.9%
+   control.c:2260               6963   3.3%
+   cpu.c:1608                   2184   1.0%
+   control.c:6868               2016   1.0%
+   cpu.c:1395                   2016   1.0%
+   cpu.c:1916                   1221   0.6%
+   control.c:4953                 25   0.0%
+   program interrupts by code: 11=2016
+
+[idle1] longjmps 64481; top sites:
+   control.c:7613              23578  36.6%
+   control.c:2371              18258  28.3%
+   control.c:7671              12568  19.5%
+   general2.c:1749              6884  10.7%
+   control.c:2260               1360   2.1%
+   control.c:6868                574   0.9%
+   cpu.c:1395                    574   0.9%
+   cpu.c:1608                    417   0.6%
+   cpu.c:1916                    220   0.3%
+   control.c:4887                 18   0.0%
+   program interrupts by code: 11=574
+
+[tso] longjmps 218326; top sites:
+   control.c:7613              77991  35.7%
+   control.c:2371              59639  27.3%
+   control.c:7671              44817  20.5%
+   general2.c:1749             24556  11.2%
+   control.c:2260               4506   2.1%
+   control.c:6868               2245   1.0%
+   cpu.c:1395                   2245   1.0%
+   cpu.c:1608                   1303   0.6%
+   cpu.c:1916                    887   0.4%
+   control.c:4953                120   0.1%
+   program interrupts by code: 11=2245
+
+[idle2] longjmps 36404; top sites:
+   control.c:7613              13784  37.9%
+   control.c:2371               9883  27.1%
+   control.c:7671               7214  19.8%
+   general2.c:1749              3343   9.2%
+   control.c:2260               1066   2.9%
+   cpu.c:1608                    317   0.9%
+   control.c:6868                257   0.7%
+   cpu.c:1395                    257   0.7%
+   cpu.c:1916                    245   0.7%
+   control.c:4887                 21   0.1%
+   program interrupts by code: 11=257
+
+[job] longjmps 10699; top sites:
+   control.c:7613               4070  38.0%
+   control.c:2371               2887  27.0%
+   control.c:7671               2112  19.7%
+   general2.c:1749               973   9.1%
+   control.c:2260                338   3.2%
+   cpu.c:1608                    107   1.0%
+   cpu.c:1916                     70   0.7%
+   control.c:6868                 60   0.6%
+   cpu.c:1395                     60   0.6%
+   control.c:4887                 13   0.1%
+   program interrupts by code: 11=60
+
+## analyze.py wljc1 (bench/ljcount/analyze.py wljc1-ljcount.log wljc1-phases.txt)
+snapshots: 98 from 1792461496.725 to 1792461593.877
+phase    dur_s   MIPS    lj/s   lj/Minst  node_ns/lj  busy%  node_lj%busy  FF_ms/s  FF%wall  FF%busy*
+ipl       4.27   14.70    53364    3629.3       3057   68.2       23.90    239.6   23.96    31.57
+idle1    10.00    0.45     3899    8657.4       2968   20.9        5.53     17.5    1.75     8.13
+tso       6.39    4.14    37202    8989.8       3004   49.3       22.65    167.0   16.70    30.45
+idle2    10.00    0.13      883    6814.1       3073   60.2        0.45      4.0    0.40     0.66
+job      22.04   54.55     1629      29.9       3038   98.6        0.50      7.3    0.73     0.74
+
+[ipl] longjmps 227812; top sites:
+   control.c:7613              85122  37.4%
+   control.c:2371              61331  26.9%
+   control.c:7671              45617  20.0%
+   general2.c:1749             21053   9.2%
+   control.c:2260               7100   3.1%
+   cpu.c:1608                   2280   1.0%
+   control.c:6868               2150   0.9%
+   cpu.c:1395                   2150   0.9%
+   cpu.c:1916                    954   0.4%
+   control.c:4953                 26   0.0%
+   program interrupts by code: 11=2150
+
+[idle1] longjmps 39004; top sites:
+   control.c:7613              14856  38.1%
+   control.c:2371              11382  29.2%
+   control.c:7671               7213  18.5%
+   general2.c:1749              3574   9.2%
+   control.c:2260                860   2.2%
+   control.c:6868                352   0.9%
+   cpu.c:1395                    352   0.9%
+   cpu.c:1608                    272   0.7%
+   cpu.c:1916                    105   0.3%
+   control.c:4887                 18   0.0%
+   program interrupts by code: 11=352
+
+[tso] longjmps 237645; top sites:
+   control.c:7613              84956  35.7%
+   control.c:2371              64961  27.3%
+   control.c:7671              48877  20.6%
+   general2.c:1749             26771  11.3%
+   control.c:2260               4857   2.0%
+   control.c:6868               2449   1.0%
+   cpu.c:1395                   2449   1.0%
+   cpu.c:1608                   1423   0.6%
+   cpu.c:1916                    750   0.3%
+   control.c:4953                133   0.1%
+   program interrupts by code: 11=2449
+
+[idle2] longjmps 8835; top sites:
+   control.c:7613               3329  37.7%
+   control.c:2371               2376  26.9%
+   control.c:7671               1762  19.9%
+   general2.c:1749               812   9.2%
+   control.c:2260                249   2.8%
+   cpu.c:1608                     76   0.9%
+   control.c:6868                 72   0.8%
+   cpu.c:1395                     72   0.8%
+   cpu.c:1916                     54   0.6%
+   control.c:4887                 20   0.2%
+   program interrupts by code: 11=72
+
+[job] longjmps 35916; top sites:
+   control.c:7613              13700  38.1%
+   control.c:2371               9683  27.0%
+   control.c:7671               7069  19.7%
+   general2.c:1749              3236   9.0%
+   control.c:2260               1204   3.4%
+   cpu.c:1608                    363   1.0%
+   cpu.c:1916                    211   0.6%
+   control.c:6868                185   0.5%
+   cpu.c:1395                    185   0.5%
+   control.c:4887                 46   0.1%
+   program interrupts by code: 11=185
+
+## analyze.py wp7ljc1 (bench/ljcount/analyze.py wp7ljc1-ljcount.log wp7ljc1-phases.txt)
+snapshots: 96 from 1792461599.908 to 1792461695.036
+phase    dur_s   MIPS    lj/s   lj/Minst  node_ns/lj  busy%  node_lj%busy  FF_ms/s  FF%wall  FF%busy*
+ipl       2.96   22.99     1999      87.0       5636   64.6        1.74      9.0    0.90     1.39
+idle1    10.00    0.24       32     130.8       6082   18.4        0.11      0.1    0.01     0.08
+tso       5.25    5.83      934     160.1       5746   53.7        1.00      4.2    0.42     0.78
+idle2    10.00    1.01       45      44.9       6370   76.3        0.04      0.2    0.02     0.03
+job      22.03   54.08       28       0.5       6563   97.7        0.02      0.1    0.01     0.01
+
+[ipl] longjmps 5924; top sites:
+   cpu.c:1608                   2410  40.7%
+   cpu.c:1395                   2308  39.0%
+   cpu.c:1916                   1191  20.1%
+   external.c:144                  7   0.1%
+   cpu.c:1856                      3   0.1%
+   cpu.c:1786                      2   0.0%
+   cpu.c:1796                      1   0.0%
+   cpu.c:1853                      1   0.0%
+   program interrupts by code: 11=2308
+
+[idle1] longjmps 319; top sites:
+   cpu.c:1395                    132  41.3%
+   cpu.c:1608                    110  34.4%
+   cpu.c:1916                     65  20.5%
+   external.c:144                 12   3.8%
+   program interrupts by code: 11=132
+
+[tso] longjmps 4899; top sites:
+   cpu.c:1395                   2479  50.6%
+   cpu.c:1608                   1460  29.8%
+   cpu.c:1916                    955  19.5%
+   external.c:144                  5   0.1%
+   program interrupts by code: 11=2479
+
+[idle2] longjmps 454; top sites:
+   cpu.c:1608                    163  36.0%
+   cpu.c:1395                    159  35.1%
+   cpu.c:1916                    120  26.5%
+   external.c:144                 11   2.5%
+   program interrupts by code: 11=159
+
+[job] longjmps 625; top sites:
+   cpu.c:1608                    260  41.6%
+   cpu.c:1916                    185  29.6%
+   cpu.c:1395                    150  24.0%
+   external.c:144                 30   4.7%
+   program interrupts by code: 11=150
+
+## analyze.py np7ljc1 (bench/ljcount/analyze.py np7ljc1-ljcount.log np7ljc1-phases.txt)
+snapshots: 154 from 1792461699.256 to 1792461810.383
+phase    dur_s   MIPS    lj/s   lj/Minst  node_ns/lj  busy%  node_lj%busy  FF_ms/s  FF%wall  FF%busy*
+ipl       2.64   23.95     2034      84.9        150   58.9        0.05      9.1    0.91     1.53
+idle1    10.00    0.82      114     139.7        184   47.6        0.00      0.5    0.05     0.11
+tso      35.86    0.85      135     159.1        181   44.1        0.01      0.6    0.06     0.14
+idle2    10.00    2.56       56      22.0        252   38.6        0.00      0.3    0.03     0.07
+job       7.86  147.75       59       0.4        254   92.9        0.00      0.3    0.03     0.03
+
+[ipl] longjmps 5380; top sites:
+   cpu.c:1608                   2166  40.3%
+   cpu.c:1395                   2008  37.3%
+   cpu.c:1916                   1196  22.2%
+   external.c:144                  7   0.1%
+   cpu.c:1856                      2   0.0%
+   cpu.c:1786                      1   0.0%
+   program interrupts by code: 11=2008
+
+[idle1] longjmps 1145; top sites:
+   cpu.c:1395                    523  45.7%
+   cpu.c:1608                    408  35.7%
+   cpu.c:1916                    203  17.7%
+   external.c:144                 10   0.9%
+   program interrupts by code: 11=523
+
+[tso] longjmps 4839; top sites:
+   cpu.c:1395                   2395  49.5%
+   cpu.c:1608                   1397  28.9%
+   cpu.c:1916                   1002  20.7%
+   external.c:144                 45   0.9%
+   program interrupts by code: 11=2395
+
+[idle2] longjmps 564; top sites:
+   cpu.c:1608                    214  37.9%
+   cpu.c:1395                    174  30.8%
+   cpu.c:1916                    165  29.3%
+   external.c:144                 12   2.0%
+   program interrupts by code: 11=174
+
+[job] longjmps 462; top sites:
+   cpu.c:1608                    197  42.7%
+   cpu.c:1916                    141  30.5%
+   cpu.c:1395                    113  24.6%
+   external.c:144                 10   2.2%
+   program interrupts by code: 11=113
+
+## summary.sh
+tag          ipl_s    tso_s     go_s  go_MIPS smoke
+nbase1       2.730     4.88     7.25    165.8 3/3
+nbase2       2.674     4.86     7.20    166.9 3/3
+nbase3       2.662     4.90     7.17    167.6 3/3
+np7a         2.626     4.93     7.43    161.8 3/3
+np7b         2.725     4.69     7.25    165.8 3/3
+np7c         2.708     4.82     7.24    166.0 3/3
+nljc1        2.700     4.92     7.33    164.0 3/3
+np7ljc1      2.645    35.86     7.47    160.9 2/3
+wbase1       4.272     6.49    21.36     56.3 3/3
+wbase2       4.270     6.00    21.57     55.7 3/3
+wbase3       4.217     6.12    21.33     56.4 3/3
+wp7a         2.911     5.43    23.27     51.7 3/3
+wp7b         2.915     5.12    21.68     55.4 3/3
+wp7c         2.915     5.08    21.34     56.3 3/3
+wljc1        4.269     6.39    21.40     56.2 3/3
+wp7ljc1      2.963     5.25    21.61     55.6 3/3
+nloopbase    2.742    23.30                   15/15
+nloopp7      2.721    22.98                   15/15
+np7d         2.728    23.04                   15/15
+wloopbase    4.270    29.74                   15/15
+wloopp7      2.963    26.09                   15/15
+nl30base     2.717    46.29                   30/30
+nl30p7a      2.717    46.08                   30/30
+nl30p7b      2.698    46.37                   30/30
+
+## browser (an internal (unpublished) test script, web/runtime test.html), bench/ljcount/websum.py
+tag        ok    ipl->IKT007I   logon   TIME ready->logoff longtask
+fbase1     True         12585    4580    833          6998 {'count': 0, 'maxMs': 0}
+fbase2     True         12636    4617    836          7005 {'count': 0, 'maxMs': 0}
+fbase3     True         11731    4549   1230          7323 {'count': 0, 'maxMs': 0}
+fp71       True          9572    4031    833          6358 {'count': 0, 'maxMs': 0}
+fp72       True          9580    4066   1224          6771 {'count': 0, 'maxMs': 0}
+fp73       True         10778    4057    831          6383 {'count': 0, 'maxMs': 0}
+cbase1     True          4207    2528    832          4736 {'count': 0, 'maxMs': 0}
+cbase2     True          4304    3015    832          5216 {'count': 0, 'maxMs': 0}
+cbase3     True          4255    2928    832          5128 {'count': 0, 'maxMs': 0}
+cp71       True          3264    2176    832          4320 {'count': 0, 'maxMs': 0}
+cp72       True          3303    2584    832          4720 {'count': 0, 'maxMs': 0}
+cp73       True          3311    2576    824          4704 {'count': 0, 'maxMs': 0}
+
+## bench/ljpthread (Node 24, then Playwright Chromium 141 / Firefox 142, cross-origin isolated)
+node24 st-legacy | RESULT test=jmp1 n=2000000 longjmps=2000000 reps=5 min_ns_per=169.81 median_ns_per=169.98 max_ns_per=170.52 min_total_ms=339.6
+node24 st-legacy | RESULT test=nojmp n=2000000 longjmps=0 reps=5 min_ns_per=11.68 median_ns_per=11.71 max_ns_per=11.72 min_total_ms=23.4
+node24 pt-legacy | RESULT test=jmp1 n=2000000 longjmps=2000000 reps=5 min_ns_per=639.20 median_ns_per=640.18 max_ns_per=640.60 min_total_ms=1278.4
+node24 pt-legacy | RESULT test=nojmp n=2000000 longjmps=0 reps=5 min_ns_per=11.75 median_ns_per=11.78 max_ns_per=11.81 min_total_ms=23.5
+node24 pt-exnref | RESULT test=jmp1 n=2000000 longjmps=2000000 reps=5 min_ns_per=611.82 median_ns_per=612.95 max_ns_per=613.92 min_total_ms=1223.6
+node24 pt-exnref | RESULT test=nojmp n=2000000 longjmps=0 reps=5 min_ns_per=11.74 median_ns_per=11.78 max_ns_per=11.80 min_total_ms=23.5
+chromium st-legacy | RESULT test=jmp1 n=2000000 longjmps=2000000 reps=5 min_ns_per=117.32 median_ns_per=117.49 max_ns_per=117.94 min_total_ms=234.6
+chromium st-legacy | RESULT test=nojmp n=2000000 longjmps=0 reps=5 min_ns_per=12.63 median_ns_per=12.65 max_ns_per=12.72 min_total_ms=25.3
+chromium pt-legacy | RESULT test=jmp1 n=2000000 longjmps=2000000 reps=5 min_ns_per=2177.96 median_ns_per=2179.68 max_ns_per=2185.22 min_total_ms=4355.9
+chromium pt-legacy | RESULT test=nojmp n=2000000 longjmps=0 reps=5 min_ns_per=2.48 median_ns_per=2.51 max_ns_per=2.52 min_total_ms=5.0
+chromium pt-exnref | RESULT test=jmp1 n=2000000 longjmps=2000000 reps=5 min_ns_per=2183.49 median_ns_per=2184.89 max_ns_per=2186.54 min_total_ms=4367.0
+chromium pt-exnref | RESULT test=nojmp n=2000000 longjmps=0 reps=5 min_ns_per=2.49 median_ns_per=2.49 max_ns_per=2.51 min_total_ms=5.0
+firefox st-legacy | RESULT test=jmp1 n=2000000 longjmps=2000000 reps=5 min_ns_per=4467.90 median_ns_per=4480.07 max_ns_per=4498.58 min_total_ms=8935.8
+firefox st-legacy | RESULT test=nojmp n=2000000 longjmps=0 reps=5 min_ns_per=25.19 median_ns_per=25.86 max_ns_per=26.05 min_total_ms=50.4
+firefox pt-legacy | RESULT test=jmp1 n=2000000 longjmps=2000000 reps=5 min_ns_per=4696.43 median_ns_per=4707.77 max_ns_per=4717.76 min_total_ms=9392.9
+firefox pt-legacy | RESULT test=nojmp n=2000000 longjmps=0 reps=5 min_ns_per=24.69 median_ns_per=25.04 max_ns_per=25.72 min_total_ms=49.4
+firefox pt-exnref | RESULT test=jmp1 n=2000000 longjmps=2000000 reps=5 min_ns_per=4697.15 median_ns_per=4709.63 max_ns_per=4717.94 min_total_ms=9394.3
+firefox pt-exnref | RESULT test=nojmp n=2000000 longjmps=0 reps=5 min_ns_per=25.88 median_ns_per=26.43 max_ns_per=26.57 min_total_ms=51.8
+
+## sizes
+4170054 ~/build/m2perf/base/out/hercules.wasm
+4176998 ~/build/m2perf/p7/out/hercules.wasm
+4146754 ~/build/m2perf/webbase/out/web/hercules.wasm
+4153695 ~/build/m2perf/webp7/out/web/hercules.wasm

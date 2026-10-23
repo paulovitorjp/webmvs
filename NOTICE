@@ -1,0 +1,58 @@
+webmvs: MVS 3.8J in the browser (Hercules compiled to WebAssembly)
+Copyright 2026 Paulo Pereira and the webmvs authors
+
+The code of this project (src/wasm, web/app, web/runtime, scripts, conf except conf/mvsce-stock/, docs) is licensed
+under the Apache License, Version 2.0 (see LICENSE). This product includes or uses the
+third-party components below. Each keeps its own license.
+
+------------------------------------------------------------------------------------------
+SDL Hercules 4.x Hyperion
+  https://github.com/SDL-Hercules-390/hyperion
+  commit ee86c4de066fcdb2ec898a157ff4c687c5f01ce2 (tag Release_4.9.1)
+  Copyright (c) Roger Bowler, Jan Jaeger, Jay Maynard and others
+  (see LICENSES/hercules-COPYRIGHT.txt).
+  License: Q Public License 1.0 (LICENSES/hercules-QPL-1.0.html).
+
+  The patches in patches/hyperion/ are modifications of Hercules and are distributed under
+  the Q Public License 1.0, not under the Apache License. hercules.wasm is a modified,
+  machine-executable form of Hercules. The complete corresponding source is available at no
+  charge: the original source at the pinned commit above, the patches in patches/hyperion/
+  (distributed separately from the original, as the QPL section 3 requires), the new files
+  linked into the binary in src/wasm/ (Apache-2.0, which allows use and redistribution, as
+  the QPL section 6 requires), and the build scripts in scripts/ (pins in docs/PINS.md).
+  Every bundle has a copy of this source in source/ and a notice in SOURCE.txt.
+
+  The Hercules extpkgs (crypto, decNumber, SoftFloat, telnet) are built unmodified at pinned
+  commits and keep their own licenses (copied into each bundle as licenses/extpkg-*).
+
+------------------------------------------------------------------------------------------
+MVS 3.8J (IBM)
+  Public domain.
+
+MVS/CE v3.0.0 (MVS-sysgen project)
+  https://github.com/MVS-sysgen/sysgen
+  The DASD volumes are built from its release. The MVS/CE add-ons keep their own terms
+  (see that repository). The DASD volumes are not in this repository.
+
+Jay Moseley's MVS 3.8J sysgen procedures
+  https://www.jaymoseley.com/hercules/
+  The basis of MVS/CE.
+
+------------------------------------------------------------------------------------------
+athornton/tn3270 (web/vendor/tn3270/, not modified)
+  https://github.com/athornton/tn3270
+  Copyright (c) 2026 Adam Thornton
+  License: MIT (web/vendor/tn3270/LICENSE).
+
+x3270 3270 font (web/vendor/tn3270/packages/canvas/assets/)
+  Copyright (c) 1993-2009, Paul Mattes. Copyright (c) 1990, Jeff Sparkes.
+  Copyright (c) 1989, Georgia Tech Research Corporation (GTRC), Atlanta, GA 30332.
+  License: BSD-style (web/vendor/tn3270/packages/canvas/assets/LICENSE-3270-font.txt).
+
+coi-serviceworker (web/vendor/coi-serviceworker/, not modified)
+  https://github.com/gzuidhof/coi-serviceworker
+  Copyright (c) 2021 Guido Zuidhof
+  License: MIT (web/vendor/coi-serviceworker/LICENSE).
+
+------------------------------------------------------------------------------------------
+This project is not affiliated with IBM, the Hercules project, or the MVS/CE project.

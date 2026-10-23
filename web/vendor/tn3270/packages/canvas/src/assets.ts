@@ -1,0 +1,94 @@
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
+import type { AtlasGeometry } from './geometry.js';
+
+/**
+ * Where this package's BUILT assets live, and how to read the atlas.
+ *
+ * WHY THIS EXISTS: two consumers now need `atlas.json`, `atlas.bin` and -- for the web front
+ * end -- the three browser modules as static files. Both previously lived beside `gui`'s own
+ * `dist`, so `main.ts` could say `join(here, 'atlas.json')`. A second consumer guessing a
+ * relative path into a sibling package's `dist` is how that breaks silently when either
+ * package moves, so the package that OWNS the assets answers where they are.
+ *
+ * `assetDir()` IS `dist`, NOT THE `assets/` DIRECTORY BESIDE IT. Two different things in this
+ * package are called assets: `assets/3270.bdf` is the checked-in BUILD INPUT that
+ * `scripts/build-atlas.mjs` reads, and `dist` is where it bakes the atlas that ships. Only
+ * the latter is what a consumer wants; asking for the font at runtime would mean shipping a
+ * BDF parser to every front end, which is the work the atlas exists to have already done.
+ *
+ * Node-side only. The browser never imports this file, and `renderer-imports.test.ts` is what
+ * keeps that true.
+ */
+const here = dirname(fileURLToPath(import.meta.url));
+
+/** This package's built output directory: the atlas and the browser modules. */
+export function assetDir(): string {
+  return here;
+}
+
+/**
+ * The modules a browser must be served: the entry point and every module its runtime graph reaches.
+ *
+ * A module the entry point imports and this list omits 404s, and the page is then a BLACK CANVAS
+ * WITH NO ERROR in any console -- measured on `bridgecore.js`, which is why `httpstatic.test.ts`
+ * walks the built import graph rather than trusting this list to be complete.
+ *
+ * `hittest.js` WAS A MEMBER because the renderer hit-tested a keypad click itself. It left on
+ * 2026-10-06 with the canvas keypad, so this list went DOWN by one as `keypadUi.js` arrived --
+ * worth noting because a list that only ever grows invites a count assertion, and this one does
+ * not only grow.
+ *
+ * `selection.js` joined for the selection gesture, and it is the reason that walker earned its
+ * keep a second time: the plan for copy/paste never mentioned this list, and the renderer's new
+ * import would have 404'd the WEB gateway's page -- blank, silent -- while every Electron harness
+ * stayed green, because Electron loads from the filesystem and never asks this server for anything.
+ * It is safe to serve: `selection.ts`'s only workspace import is an `import type`, which erases.
+ *
+ * `keypadUi.js` joined for the keypad overlay, and it is the FIRST ENTRY HERE THE RENDERER DOES
+ * NOT REACH -- `web/src/bridge.js` imports it directly, through an import-map entry naming this
+ * exact module rather than the package barrel. So `renderer-imports.test.ts` cannot see it (it
+ * walks the renderer's graph) and `canvas/test/keypadUiModule.test.ts` walks its one-import graph
+ * instead. Note what that means for this list's own description: "every module the ENTRY POINT's
+ * graph reaches" is now one sentence short of the truth, because the page has two entry points.
+ */
+export const BROWSER_MODULES: readonly string[] = Object.freeze([
+  'renderer.js', 'blit.js', 'keys.js', 'selection.js', 'keypadUi.js',
+]);
+
+/**
+ * Read the baked atlas. Throws NAMING THE BUILD when the package was not built.
+ *
+ * ## A SCOPED BUILD OF A CONSUMER LEAVES THE ATLAS UNBUILT
+ *
+ * MEASURED 2026-09-15, from a clean tree: `npm run build -w @tn3270/gui` EXITS 0 and fills
+ * `packages/canvas/dist` with compiled `.js` -- and no `atlas.json` or `atlas.bin`. Project
+ * references chain TYPESCRIPT COMPILATION and nothing else: `tsc --build` follows
+ * `gui`'s reference to this package and compiles it, but it has no idea this package's own
+ * `build` script has a SECOND step (`node scripts/build-atlas.mjs`) that bakes the atlas.
+ * Only `npm run build` at the root, or `-w @tn3270/canvas`, runs that step.
+ *
+ * `gui` used to carry `&& node scripts/build-atlas.mjs` in its own build script, so a scoped
+ * gui build was self-sufficient; extracting this package moved that step behind a reference
+ * that cannot pull it. Hence the message below names the command rather than letting a bare
+ * `ENOENT ... dist/atlas.json` be the whole diagnosis -- that failure surfaced as an
+ * unhandled rejection and a BLANK WINDOW that never quit, which is the shape this repo keeps
+ * writing comments to prevent.
+ *
+ * The original error is kept as `cause` so a developer can still see which file was missing.
+ */
+export function readAtlas(): { geometry: AtlasGeometry; coverage: Uint8Array } {
+  try {
+    const geometry = JSON.parse(readFileSync(join(here, 'atlas.json'), 'utf8')) as AtlasGeometry;
+    const coverage = new Uint8Array(readFileSync(join(here, 'atlas.bin')));
+    return { geometry, coverage };
+  } catch (err) {
+    if ((err as { code?: string }).code === 'ENOENT') {
+      throw new Error(
+        '@tn3270/canvas has not been built: run npm run build -w @tn3270/canvas',
+        { cause: err });
+    }
+    throw err;
+  }
+}

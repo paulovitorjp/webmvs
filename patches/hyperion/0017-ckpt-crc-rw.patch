@@ -1,0 +1,21 @@
+diff --git a/sr.c b/sr.c
+index 7a36451e..c48c05f2 100644
+--- a/sr.c
++++ b/sr.c
+@@ -574,7 +574,15 @@ static int ckpt_file_crc( const char* path, U64* size, U32* crc, int dosync )
+     ssize_t n;
+     U32     c = crc32( 0L, Z_NULL, 0 );
+     U64     s = 0;
+-    int     fd = HOPEN( path, O_RDONLY | O_BINARY );
++    /* O_RDWR, not O_RDONLY. In the browser build                      */
++    /* WasmFS reads an OPFS file opened read-only through a Blob, and   */
++    /* each read() makes a new JS ArrayBuffer of its size (64 KB here)  */
++    /* in the OPFS proxy thread: about 2.1 MB of garbage per checkpoint */
++    /* that only that worker GC frees (Chromium: the renderer grew      */
++    /* 1.8 MiB per checkpoint between GCs, +120-150 MiB/h in the 60-min */
++    /* soak). A read-write open uses a sync access handle that reads    */
++    /* into wasm memory. Nothing is written; native: the same reads.    */
++    int     fd = HOPEN( path, O_RDWR | O_BINARY );
+     if (fd < 0)
+         return -1;
+     while ((n = read( fd, buf, sizeof( buf ))) > 0)

@@ -1,0 +1,747 @@
+/**
+ * Wire constants for the 3270 datastream and the telnet options TN3270 uses.
+ *
+ * Verified against GA23-0059-07 Appendix F (hexadecimal index), Tables 3-2
+ * (WCC), 3-4 (AID), 4-4 (field attributes), 4-6 (attribute types), and 6-1
+ * (Query Replies), plus chapter 5 (Read Partition) and chapter 6 (Query
+ * Reply), cross-checked against x3270's include/3270ds.h. Do not change a
+ * value without checking both sources: the manual's OCR mangles some hex
+ * digits in tables, and memory is not a source.
+ */
+
+/** Telnet commands (RFC 854), plus EOR (RFC 885). */
+export const TelnetCmd = {
+  EOR: 239,
+  SE: 240,
+  NOP: 241,
+  DM: 242,
+  BREAK: 243,
+  IP: 244,
+  AO: 245,
+  AYT: 246,
+  EC: 247,
+  EL: 248,
+  GA: 249,
+  SB: 250,
+  WILL: 251,
+  WONT: 252,
+  DO: 253,
+  DONT: 254,
+  IAC: 255,
+} as const;
+
+/** Telnet options. The first three are what make a session TN3270 (RFC 1576 §3). */
+export const TelnetOpt = {
+  BINARY: 0,
+  TERMINAL_TYPE: 24,
+  EOR: 25,
+  ECHO: 1,
+  SUPPRESS_GO_AHEAD: 3,
+  TIMING_MARK: 6,
+  REGIME_3270: 29,
+  TN3270E: 40,
+  NEW_ENVIRON: 39,
+} as const;
+
+/** TERMINAL-TYPE subnegotiation codes (RFC 1091). */
+export const TelnetSubopt = { IS: 0, SEND: 1 } as const;
+
+/**
+ * NEW-ENVIRON group codes (RFC 1572), from x3270's include/arpa_telnet.h:122-125.
+ *
+ * `ESC` is the escape prefix, not a group a host may request: any byte of a NAME or a
+ * VALUE that happens to equal one of these four codes is prefixed with `ESC` so the
+ * receiver does not read it as a delimiter.
+ */
+export const EnvironGroup = {
+  VAR: 0,
+  VALUE: 1,
+  ESC: 2,
+  USERVAR: 3,
+} as const;
+
+/**
+ * NEW-ENVIRON qualifiers (RFC 1572), from x3270's include/arpa_telnet.h:117-119.
+ *
+ * IS AND SEND SHARE THEIR VALUES WITH `TelnetSubopt`, WHICH IS TERMINAL-TYPE's, AND THE
+ * TWO ARE NOT THE SAME CONCEPT. Both encode "here it is" as 0 and "give it to me" as 1,
+ * by coincidence of two independent RFCs. Reusing one for the other would work today and
+ * would be wrong the first time either changed. The same trap, and the same resolution,
+ * as this file's note on XAH.DEFAULT versus XA.RESET.
+ *
+ * INFO (2) is a host-to-client unsolicited update. We never send it and no trace in
+ * x3270's collection sends one to us; it is defined so a received INFO can be traced by
+ * name rather than as an unknown byte. x3270 does define it (TELQUAL_INFO,
+ * arpa_telnet.h:119) and names it in the `telquals[]` trace table (Common/telnet.c:143,
+ * `{ "IS", "SEND", "INFO" }`), used by telnet_new_environ.c to log subnegotiations.
+ */
+export const EnvironQual = {
+  IS: 0,
+  SEND: 1,
+  INFO: 2,
+} as const;
+
+/**
+ * TN3270E subnegotiation operations (RFC 2355 §3, rfc2355.txt:317-347), verified
+ * against x3270's include/tn3270e.h.
+ *
+ * THE OPERAND ORDER IS ASYMMETRIC AND MISORDERING IT FAILS SILENTLY. The server
+ * sends SEND then DEVICE_TYPE (0x08 0x02); the client replies DEVICE_TYPE then
+ * REQUEST (0x02 0x07). x3270 pins the layout at telnet.c:2199, where the test is
+ * `sbbuf[2] == TN3270E_OP_DEVICE_TYPE` — so sbbuf[1] is the verb. Sending
+ * 0x02 0x08 was tried while building the test harness: real s3270 logged
+ * `DEVICE-TYPE ??8` and then stalled, with no reject and no error.
+ */
+export const Tn3270eOp = {
+  ASSOCIATE: 0x00,
+  CONNECT: 0x01,
+  DEVICE_TYPE: 0x02,
+  FUNCTIONS: 0x03,
+  IS: 0x04,
+  REASON: 0x05,
+  REJECT: 0x06,
+  REQUEST: 0x07,
+  SEND: 0x08,
+} as const;
+
+/**
+ * DEVICE-TYPE REJECT reason codes (RFC 2355 §3).
+ *
+ * `INV_NAME` is the RFC's spelling; x3270 calls the same value
+ * TN3270E_REASON_INV_DEVICE_NAME. Same code 3, two names — the RFC's is used here.
+ */
+export const Tn3270eReason = {
+  CONN_PARTNER: 0x00,
+  DEVICE_IN_USE: 0x01,
+  INV_ASSOCIATE: 0x02,
+  INV_NAME: 0x03,
+  INV_DEVICE_TYPE: 0x04,
+  TYPE_NAME_ERROR: 0x05,
+  UNKNOWN_ERROR: 0x06,
+  UNSUPPORTED_REQ: 0x07,
+} as const;
+
+/**
+ * UNBIND reason codes (x3270's include/tn3270e.h:108-118).
+ *
+ * RFC 2355 does not enumerate these; x3270 decodes them in `unbind_reason`
+ * (Common/telnet.c:2592) and the wire is the authority. THE GAPS ARE REAL — there is
+ * no 0x03-0x06 and no 0x0d, and x3270 names none of them either. An unrecognized
+ * reason is reported as unknown rather than guessed at.
+ *
+ * BIND_FORTHCOMING IS THE OPERATIONALLY INTERESTING ONE: it means another BIND is
+ * coming, which is how a host hands a session between applications. A client that
+ * treated it as a teardown would drop a session the host intended to keep.
+ *
+ * NORMAL is 0x01, NOT 0x00, and that matters: a zero-length UNBIND body carries no
+ * reason at all, so 0x00 must stay available to mean "absent".
+ */
+export const Tn3270eUnbindReason = {
+  NORMAL: 0x01,
+  BIND_FORTHCOMING: 0x02,
+  VR_INOPERATIVE: 0x07,
+  RX_INOPERATIVE: 0x08,
+  HRESET: 0x09,
+  SSCP_GONE: 0x0a,
+  VR_DEACTIVATED: 0x0b,
+  LU_FAILURE_PERM: 0x0c,
+  LU_FAILURE_TEMP: 0x0e,
+  CLEANUP: 0x0f,
+  BAD_SENSE: 0xfe,
+} as const;
+
+/**
+ * Negotiable functions.
+ *
+ * CONTENTION_RESOLUTION (0x05) is NOT in RFC 2355 — it is a later extension that
+ * x3270 requests anyway (telnet.c:953). We request it for parity; nothing depends
+ * on a host granting it. x3270 also defines TN3270E_FUNC_SNA_SENSE = 6, which is
+ * deliberately absent here: we neither request nor grant it, and an unrecognized
+ * inbound code is dropped from the list per §7.2.2 rather than refused.
+ *
+ * SCS_CTL_CODES and DATA_STREAM_CTL are printer-session functions by definition
+ * (§7.2.2) and belong to the printer stage.
+ *
+ * BIND_IMAGE IS requested as of this task (tn3270e.ts, REQUESTED_FUNCTIONS). Granted
+ * it and sent no BIND, real s3270 never enters 3270 mode at all — the write is
+ * delivered and ignored (telnet.c:2339). That hazard is real and unchanged; what
+ * changed is the measurement behind asking anyway — see tn3270e.ts's comment on
+ * REQUESTED_FUNCTIONS for the trace-collection count and the timeout that bounds it.
+ */
+export const Tn3270eFunc = {
+  BIND_IMAGE: 0x00,
+  DATA_STREAM_CTL: 0x01,
+  RESPONSES: 0x02,
+  SCS_CTL_CODES: 0x03,
+  SYSREQ: 0x04,
+  CONTENTION_RESOLUTION: 0x05,
+} as const;
+
+/**
+ * Header DATA-TYPE values (RFC 2355 §8.1.1).
+ *
+ * `DATA_3270` rather than `3270_DATA` only because an identifier cannot start with
+ * a digit; the wire name is 3270-DATA. x3270 additionally defines
+ * TN3270E_DT_BID = 0x09, which the RFC's list does not reach — an inbound 0x09 is
+ * traced and dropped like any other type we do not implement.
+ */
+export const Tn3270eDataType = {
+  DATA_3270: 0x00,
+  SCS_DATA: 0x01,
+  RESPONSE: 0x02,
+  BIND_IMAGE: 0x03,
+  UNBIND: 0x04,
+  NVT_DATA: 0x05,
+  REQUEST: 0x06,
+  SSCP_LU_DATA: 0x07,
+  PRINT_EOJ: 0x08,
+} as const;
+
+/**
+ * Header REQUEST-FLAG (RFC 2355 §8.1.2), meaningful only when DATA-TYPE is REQUEST.
+ *
+ * THE RFC DEFINES EXACTLY ONE VALUE, AND THIS LIST IS NOT EXHAUSTIVE OF WHAT A HOST
+ * MAY SEND. x3270 also has SEND_DATA 0x01, KEYBOARD_RESTORE 0x02 and SIGNAL 0x04.
+ * All three are only meaningful on a DATA-TYPE of REQUEST, which we do not handle,
+ * so they are omitted rather than defined-and-ignored.
+ */
+export const Tn3270eRequestFlag = { ERR_COND_CLEARED: 0x00 } as const;
+
+/**
+ * Header RESPONSE-FLAG (RFC 2355 §8.1.3).
+ *
+ * The field is OVERLOADED BY DATA-TYPE, which is why two pairs share values. On
+ * 3270-DATA or SCS-DATA it says whether the sender wants a response; on RESPONSE it
+ * says whether this is a positive or negative one. So POSITIVE_RESPONSE equals
+ * NO_RESPONSE (0x00) and NEGATIVE_RESPONSE equals ERROR_RESPONSE (0x01) — not a
+ * copy-paste error. Both spellings are kept so each call site reads as what it
+ * means.
+ *
+ * x3270 has a third RESPONSE value, TN3270E_RSF_SNA_SENSE 0x02, which RFC 2355 does
+ * not list among the response flags.
+ */
+export const Tn3270eResponseFlag = {
+  NO_RESPONSE: 0x00,
+  ERROR_RESPONSE: 0x01,
+  ALWAYS_RESPONSE: 0x02,
+  POSITIVE_RESPONSE: 0x00,
+  NEGATIVE_RESPONSE: 0x01,
+} as const;
+
+/**
+ * The one data byte of a RESPONSE message (RFC 2355 §10.4.1, rfc2355.txt:1440-1462).
+ *
+ * DEVICE_END and COMMAND_REJECT share 0x00 because the meaning comes from
+ * RESPONSE-FLAG: under POSITIVE, 0x00 is "successful completion (when sent by the
+ * client, this is equivalent to Device End)"; under NEGATIVE it is "an invalid 3270
+ * command was received". OP_CHECK 0x02 is "an illegal 3270 buffer address or order
+ * sequence was received".
+ *
+ * The printer senses are omitted as unreachable from a display session: 0x01
+ * "printer is not ready" (x3270's INTERVENTION_REQUIRED) and 0x03 "printer is
+ * powered off or not connected" (COMPONENT_DISCONNECTED).
+ */
+export const Tn3270eSense = {
+  DEVICE_END: 0x00,
+  COMMAND_REJECT: 0x00,
+  OP_CHECK: 0x02,
+} as const;
+
+/**
+ * 3270 commands, non-SNA/channel encoding. x3270 accepts these as well as the
+ * SNA codes below, so we do too.
+ *
+ * Note WSF (0x11) collides numerically with Order.SBA; they are distinguished
+ * by position (command byte vs. order byte), never by value. Note also that
+ * Cmd.NOP (0x03) is a 3270 command and has nothing to do with TelnetCmd.NOP.
+ */
+export const Cmd = {
+  W: 0x01,
+  RB: 0x02,
+  NOP: 0x03,
+  EW: 0x05,
+  RM: 0x06,
+  EWA: 0x0d,
+  RMA: 0x0e,
+  EAU: 0x0f,
+  WSF: 0x11,
+} as const;
+
+/** 3270 commands, SNA encoding — what a TN3270 host normally sends. */
+export const SnaCmd = {
+  RMA: 0x6e,
+  EAU: 0x6f,
+  EWA: 0x7e,
+  W: 0xf1,
+  RB: 0xf2,
+  WSF: 0xf3,
+  EW: 0xf5,
+  RM: 0xf6,
+} as const;
+
+/** Buffer orders (Appendix F). SA/SFE/MF are recognized in stage 1 only so
+ * they can be skipped by length instead of mis-executed. */
+export const Order = {
+  PT: 0x05,
+  GE: 0x08,
+  SBA: 0x11,
+  EUA: 0x12,
+  IC: 0x13,
+  SF: 0x1d,
+  SA: 0x28,
+  SFE: 0x29,
+  MF: 0x2c,
+  RA: 0x3c,
+} as const;
+
+/**
+ * The two format control orders the Dup and Field Mark keys write (Table 4-3,
+ * pages.txt:3196-3197: "DUP Duplicate X'1C'", "FM Field Mark X'1E'"), confirmed
+ * against x3270's `include/3270ds.h:364-365` — `EBC_dup 0x1c`, `EBC_fm 0x1e`.
+ *
+ * THEY ARE CHARACTERS, NOT AIDS, which is why they live here beside `Order` and
+ * not beside the `AID` table a reader might look in first. x3270's Dup and
+ * FieldMark actions both call `key_Character(...)` (`Common/kybd.c:2788`,
+ * `:2825`), so they go into the buffer and set MDT exactly as a typed letter
+ * does. Nothing about them reaches `sendAID`. Table 4-3 is where the manual puts
+ * them too, alongside NUL and SUB.
+ *
+ * Stored in the buffer they display as an overscored asterisk and an overscored
+ * semicolon respectively (same table); we render neither yet.
+ */
+export const EBCDIC_DUP = 0x1c;
+export const EBCDIC_FIELD_MARK = 0x1e;
+
+/**
+ * The four EBCDIC bytes of the TEST REQUEST READ heading, which is what the Sys Req
+ * (TEST REQ) key puts on the wire on a classic, non-TN3270E session.
+ *
+ * Values from x3270's `include/3270ds.h`: `EBC_soh 0x01` and `EBC_stx 0x02` at `:356-357`,
+ * `EBC_slash 0x61` at `:373`, `EBC_percent 0x6c` at `:375`. In order the heading reads
+ * SOH, `%`, `/`, STX — see `buildReadModified`, which assembles it.
+ *
+ * THEY ARE NOT AN AID, and this is the counterintuitive part of the whole key. `AID.SYSREQ`
+ * (0xf0) is a real architected AID — GA23-0059-07 Table 3-4 lists "Test Req and Sys Req F0"
+ * (pages.txt:2017) — and it is what SELECTS this heading, but it is never itself
+ * transmitted for this key. The manual is explicit: the test request read data stream is
+ * "the same as described previously for read-modified operations, EXCLUDING the 3-byte read
+ * heading (AID and cursor address)" (pages.txt:13786-13789). x3270 implements exactly that:
+ * `ctlr_read_modified`'s `case AID_SYSREQ` writes these four bytes and `break`s out of the
+ * AID switch without ever emitting the AID (`Common/ctlr.c:770-777`).
+ *
+ * `EBCDIC_PERCENT` IS THE SAME BYTE AS `AID.PA1` — both 0x6c, and a wire dump cannot tell
+ * them apart. Named separately so the code that builds the heading says which it means, and
+ * so a reader decoding a capture does not conclude a PA1 went out.
+ *
+ * There is no ETX here. The manual's BSC form ends in one (pages.txt:13780-13785) because
+ * ETX is BSC block framing; the non-SNA form is "the same as for the BSC environment,
+ * except there is no ETX" (pages.txt:14180-14184), and a telnet record is terminated by
+ * IAC EOR instead.
+ */
+export const EBCDIC_SOH = 0x01;
+export const EBCDIC_PERCENT = 0x6c;
+export const EBCDIC_SLASH = 0x61;
+export const EBCDIC_STX = 0x02;
+
+/**
+ * Structured field identifiers (SFID), GA23-0059 p. 5-51 and chapter 6.
+ *
+ * 0x81 is BOTH the Query Reply SFID (inbound — i.e. sent by us; chapter 6 is
+ * "Inbound Structured Fields") and, as a QCODE, the Usable Area reply code.
+ * They occupy different byte positions and are never interchangeable: SFID is
+ * byte 2, QCODE is byte 3.
+ */
+export const Sfid = {
+  READ_PARTITION: 0x01,
+  QUERY_REPLY: 0x81,
+  /**
+   * `SF_TRANSFER_DATA` — DFT file transfer, dispatched by x3270 at `sf.c:175`.
+   * Both a host request type and the SFID we send our replies under. A host only
+   * sends this if we advertised Query Reply (DDM) 0x95, which `-ddm on` does.
+   */
+  TRANSFER_DATA: 0xd0,
+} as const;
+
+/** PID value meaning "this is a query, not a read of partition 0x00-0x7E". */
+export const PID_QUERY = 0xff;
+
+/**
+ * Read Partition TYPE byte, GA23-0059 p. 5-51 (pages.txt:6350-6355).
+ *
+ * We answer both query types. The table also lists X'6E' Read Modified All,
+ * X'F2' Read Buffer and X'F6' Read Modified — reads against a REAL partition,
+ * which we do not support, so they are absent here on purpose. x3270 handles
+ * them (sf.c:304-334) and requires PID 0x00 for each; we have no partitions to
+ * read.
+ */
+export const ReadPartitionType = {
+  QUERY: 0x02,
+  QUERY_LIST: 0x03,
+} as const;
+
+/**
+ * Query List REQTYP, GA23-0059 p. 5-51 and p. 6-19.
+ *
+ * BITS 0-1 OF BYTE 5, not the whole byte: "an additional parameter, REQTYP
+ * (Request Type), bits 0-1 of byte 5 and, / optionally, a list of QCODES
+ * starting at byte 6" (pages.txt:8508-8509, p. 6-19). Bits 2-7 are reserved —
+ * the byte table's row reads "2-7 SFID Reserved" (pages.txt:6356; that "SFID"
+ * is OCR damage, the field is unnamed reserved space).
+ *
+ * The values below are therefore the SHIFTED forms, B'00'/B'01'/B'10' occupying
+ * the top two bits: 0x00, 0x40, 0x80. That is exactly how x3270 spells them
+ * (include/3270ds.h:118-120):
+ *
+ *     #define   SF_RPQ_LIST	0x00	//   QCODE list
+ *     #define   SF_RPQ_EQUIV	0x40	//   equivalent+ QCODE list
+ *     #define   SF_RPQ_ALL	0x80	//   all
+ *
+ * B'11' (0xC0) is "Reserved" (pages.txt:6361) and there is no entry for it:
+ * x3270 rejects an unrecognized request type outright (sf.c:301-303, `default:
+ * ... return PDS_BAD_CMD`), and so do we.
+ *
+ * NOTE x3270 compares `buf[5]` against these WITHOUT masking off bits 2-7, so a
+ * host setting a reserved low bit lands in its default case and is rejected.
+ * We mask instead — see REQTYP_MASK — because the manual defines the field as
+ * bits 0-1 and says nothing about the other six mattering.
+ */
+export const ReqTyp = {
+  QCODE_LIST: 0x00,
+  EQUIVALENT: 0x40,
+  ALL: 0x80,
+} as const;
+
+/** Bits 0-1 of byte 5. The rest is reserved; see the note on ReqTyp. */
+export const REQTYP_MASK = 0xc0;
+
+/**
+ * Query Reply codes (QCODE), GA23-0059 Table 6-1. Only what we implement.
+ *
+ * Usable Area and Implicit Partition are legible in that table (pages.txt:8638,
+ * :8608). Summary's own code is NOT: its row OCRs as "Summary Yes X'BO' Yes
+ * Yes" (pages.txt:8635), and 0xB0 is a real QCODE elsewhere (Segment,
+ * 3270ds.h:173), so the damage is not self-evident. 0x80 comes from the prose
+ * at p. 6-20: "must support the Summary Query Reply, QCODE = X '80'"
+ * (pages.txt:8568-8569), and from 3270ds.h:136 QR_SUMMARY 0x80.
+ */
+export const Qcode = {
+  SUMMARY: 0x80,
+  USABLE_AREA: 0x81,
+  /**
+   * Color. Table 6-1: "Color Yes X'86' Yes Yes" (pages.txt:8589) — that row is
+   * OCR-clean, and the unit's own byte table agrees: "3 QCODE X'86' Identifies
+   * this Query Reply as Color" (pages.txt:9214). x3270's 3270ds.h:142
+   * QR_COLOR 0x86.
+   *
+   * Table 6-1's "Yes" in the Query column is what makes `returnedForQuery: true`
+   * correct for it; x3270 also gives it a `single_fn` (sf.c:86), which is only
+   * reachable from a plain Query or an enumerating Query List.
+   */
+  COLOR: 0x86,
+  /**
+   * Highlighting. Table 6-1: "Highlighting Yes X'87' Yes Yes"
+   * (pages.txt:8605), confirmed by "3 QCODE X'87' Identifies this Query Reply as
+   * Highlighting" (pages.txt:10342) and 3270ds.h:143 QR_HIGHLIGHTING 0x87.
+   */
+  HIGHLIGHTING: 0x87,
+  /**
+   * Distributed Data Management, the advertisement that lets a host choose DFT
+   * file transfer instead of CUT.
+   *
+   * Table 6-1: "Distributed Data Management Yes X'95' Yes Yes"
+   * (pages.txt:8595), and the unit's own section confirms both the code and the
+   * causality: "The Query Reply (Distributed Data Management) indicates the
+   * Distributed Data Management (DDM) subsets supported. When this function is
+   * supported, this Query Reply is transmitted inbound in reply to a Read
+   * Partition structured field specifying Query or Query List"
+   * (pages.txt:9806-9810). x3270's 3270ds.h:155 QR_DDM 0x95.
+   *
+   * THIS IS THE ONLY SWITCH BETWEEN CUT AND DFT, and it is ours to throw rather
+   * than the host's to offer: the client does not choose a transfer protocol,
+   * it declares a capability and the host picks. `ft_cut.c:440` and
+   * `ft_dft.c:175` call `ft_running(true)`/`ft_running(false)`, which REPORTS
+   * which protocol arrived (read once, `ft.c:556`, to print "CUT" or "DFT").
+   * See docs/superpowers/specs/2026-09-24-dft-file-transfer-design.md.
+   */
+  DDM: 0x95,
+  IMPLICIT_PARTITION: 0xa6,
+  /**
+   * Null (QCODE 0xFF) — "we support none of what you asked for".
+   *
+   * NOT a capability, which is why it is not in DEFAULT_CAPABILITIES and why
+   * Table 6-1 gives it "Null No X'FF' No No" (pages.txt:8612): the only three
+   * columns are Query / Query List / Equivalent / All and it is returned by
+   * NONE of them as a matter of support. It is returned by exactly one path,
+   * REQTYP=QCODE List matching nothing we have. x3270 keeps it in its reply
+   * table but pointedly excludes it from every enumeration, with the comment
+   * "QR_NULL must be last in the table" (sf.c:94) and NSR = NSR_ALL - 1
+   * (sf.c:102-103) so the loops stop before it.
+   *
+   * Value from 3270ds.h:180 `#define QR_NULL 0xff` and from the manual's own
+   * byte table, "3 QCODE X'FF' Identifies this Query Reply as Null"
+   * (pages.txt:10771).
+   */
+  NULL: 0xff,
+} as const;
+
+/**
+ * SFE/MF attribute-type for the basic 3270 field attribute.
+ *
+ * 0xC0, confirmed twice because the manual's prose example OCRs as X'C8'
+ * (pages.txt:2882). The attribute-type table (Table 4-6) reads
+ * "X'CO' 3270 Field attribute" (pages.txt:3430) — that O is OCR of a zero —
+ * and x3270's include/3270ds.h:230 defines XA_3270 0xc0. Numerically equal to
+ * FA.PRINTABLE, which is a coincidence of the architecture, not a relation —
+ * do not unify them.
+ *
+ * This is one row of Table 4-6. The other rows this codebase names are just
+ * below, as `XA`/`XAH`/`XAC_DEFAULT`.
+ */
+export const XA_3270 = 0xc0;
+
+/**
+ * Extended attribute types, carried by SA (X'28') and as SFE type-value pairs
+ * — the other rows of Table 4-6, of which `XA_3270` above is one row (0xC0).
+ * x3270's include/3270ds.h:229 (XA_ALL), 240-250.
+ *
+ * `RESET` is x3270's XA_ALL, deliberately renamed: "reset" names what it
+ * DOES (return every character attribute type to its default), where "all"
+ * names only which types it affects. Every other member below is a
+ * mechanical prefix-drop of its x3270 name; this one isn't, on purpose.
+ *
+ * RESET's defining text is under the heading "All Character Attributes":
+ * "All character attributes reset all character attribute types that are
+ * specifiable in the SA order to their default value. Attribute types
+ * affected are color, highlighting, and character set. The only valid value
+ * setting is X'00' ... The attribute type X'00' can appear only in the SA
+ * order" (pages.txt:3449-3456). Separately, pages.txt:2986 says X'00' is the
+ * one attribute type "always supported by the SA order" — i.e. every
+ * implementation must accept it — which supports supportedness, not the
+ * reset-all definition; don't cite it for the latter.
+ *
+ * Do not confuse `RESET` (0x00 as a TYPE, meaning reset-all) with
+ * `XAC_DEFAULT` below (0x00 as a VALUE under FOREGROUND/BACKGROUND, meaning
+ * "device default color"). Both appear in the committed TK5 fixture (101
+ * FOREGROUND, 12 RESET), so a conflation is not hypothetical.
+ *
+ * CHARSET is named but deliberately NOT implemented — it selects Programmable
+ * Symbol Sets, which are out of scope. It stays counted by setAttributeIgnored.
+ * Table 4-6 also has VALIDATION (0xC1), OUTLINING (0xC2), and TRANSPARENCY
+ * (0x46) (3270ds.h:231, 235, 251); those are out of scope too and, unlike
+ * CHARSET, not even named here.
+ */
+export const XA = {
+  RESET: 0x00,
+  HIGHLIGHTING: 0x41,
+  FOREGROUND: 0x42,
+  CHARSET: 0x43,
+  BACKGROUND: 0x45,
+} as const;
+
+/**
+ * Highlighting values for `XA.HIGHLIGHTING`. x3270's 3270ds.h:241-246.
+ *
+ * TRAP: the manual's Chapter 4 highlighting table (pages.txt:3487-3498) lists
+ * only FIVE settings — X'00', X'F0', X'F1', X'F2', X'F4' — and OMITS X'F8'
+ * Intensify entirely. A verifier who checks only that obvious table will find
+ * 5 of these 6 values and may wrongly conclude INTENSIFY is wrong. INTENSIFY
+ * is confirmed instead by the Query Reply (Highlighting) section, which lists
+ * all six including "X'F8' ... Intensify" (pages.txt:10310-10325). Same class
+ * of trap as the Qcode.SUMMARY OCR note and the XA_3270 mangled-hex note
+ * above: check the source that actually settles it, not the first one found.
+ */
+export const XAH = {
+  DEFAULT: 0x00,
+  NORMAL: 0xf0,
+  BLINK: 0xf1,
+  REVERSE: 0xf2,
+  UNDERSCORE: 0xf4,
+  INTENSIFY: 0xf8,
+} as const;
+
+/** Color value meaning "the device default", per Query Reply (Color). 3270ds.h:248. */
+export const XAC_DEFAULT = 0x00;
+
+/**
+ * Attention identifiers (Table 3-4).
+ *
+ * `SYSREQ` IS THE ONE MEMBER THAT IS NEVER TRANSMITTED. Table 3-4 lists it — "Test Req and
+ * Sys Req F0" (pages.txt:2017) — and it is a genuine AID in the sense that it is what
+ * `buildReadModified` switches on. But that function turns it into the four-byte TEST
+ * REQUEST READ heading (`EBCDIC_SOH`/`EBCDIC_PERCENT`/`EBCDIC_SLASH`/`EBCDIC_STX` above)
+ * and drops the AID, exactly as x3270's `ctlr_read_modified` does (`Common/ctlr.c:770-777`).
+ * So 0xf0 never reaches the wire for the Sys Req key. Under TN3270E the key is not an AID at
+ * all: it is Telnet IAC AO. See `Session.sysreq`.
+ */
+export const AID = {
+  NONE: 0x60,
+  QREPLY: 0x61,
+  ENTER: 0x7d,
+  PF1: 0xf1,
+  PF2: 0xf2,
+  PF3: 0xf3,
+  PF4: 0xf4,
+  PF5: 0xf5,
+  PF6: 0xf6,
+  PF7: 0xf7,
+  PF8: 0xf8,
+  PF9: 0xf9,
+  PF10: 0x7a,
+  PF11: 0x7b,
+  PF12: 0x7c,
+  PF13: 0xc1,
+  PF14: 0xc2,
+  PF15: 0xc3,
+  PF16: 0xc4,
+  PF17: 0xc5,
+  PF18: 0xc6,
+  PF19: 0xc7,
+  PF20: 0xc8,
+  PF21: 0xc9,
+  PF22: 0x4a,
+  PF23: 0x4b,
+  PF24: 0x4c,
+  PA1: 0x6c,
+  PA2: 0x6e,
+  PA3: 0x6b,
+  CLEAR: 0x6d,
+  SYSREQ: 0xf0,
+  SELECT: 0x7e,
+  SF: 0x88,
+} as const;
+
+/** PF key number 1-24, at index n-1, to its AID byte. */
+export const PF_AIDS: readonly number[] = [
+  AID.PF1, AID.PF2, AID.PF3, AID.PF4, AID.PF5, AID.PF6,
+  AID.PF7, AID.PF8, AID.PF9, AID.PF10, AID.PF11, AID.PF12,
+  AID.PF13, AID.PF14, AID.PF15, AID.PF16, AID.PF17, AID.PF18,
+  AID.PF19, AID.PF20, AID.PF21, AID.PF22, AID.PF23, AID.PF24,
+];
+
+/** PA key number 1-3, at index n-1, to its AID byte. */
+export const PA_AIDS: readonly number[] = [AID.PA1, AID.PA2, AID.PA3];
+
+/**
+ * The AID byte for PF key `n`, or a `RangeError` naming the range.
+ *
+ * ## USE THIS RATHER THAN INDEXING THE TABLE, AND THE REASON IS A MEASURED LIVE DEFECT
+ *
+ * `PF_AIDS[n - 1]!` looks safe and is not. An out-of-range `n` yields `undefined`, the non-null
+ * assertion hides it from the compiler, and `buildReadModified` finishes the job:
+ * `Uint8Array.from([undefined])` SILENTLY COERCES TO 0. So `{kind:'pf', n:-1}` did not fail --
+ * it transmitted **AID 0x00 to a live mainframe**, then locked the local keyboard while
+ * `applyAction`'s catch-all swallowed any complaint. Measured on the wire as
+ * `[0x00, 0x40, 0x40, 0xff, 0xef]`.
+ *
+ * Three of the four front ends were safe only by accident, because their `n` comes from a trusted
+ * keymap table. The web gateway is the first where a REMOTE party supplies it. Bounding it at that
+ * boundary closed the live hole; this closes the CLASS, by making the unchecked index unreachable
+ * from the API rather than merely unused today.
+ *
+ * It throws rather than returning `undefined` deliberately: a caller that must handle `undefined`
+ * can still forget, and `sendAID` would take it. A throw from inside `applyAction`'s `try` puts
+ * nothing on the wire at all, which is the correct outcome for a number no key can produce.
+ *
+ * The bound is the table's own length, never a literal 24, so the two cannot drift apart.
+ */
+export function pfAID(n: number): number {
+  const aid = Number.isInteger(n) ? PF_AIDS[n - 1] : undefined;
+  if (aid === undefined) {
+    throw new RangeError(`PF number must be an integer in 1..${PF_AIDS.length}, not ${n}`);
+  }
+  return aid;
+}
+
+/** The AID byte for PA key `n`, or a `RangeError`. See `pfAID` for why this is not an index. */
+export function paAID(n: number): number {
+  const aid = Number.isInteger(n) ? PA_AIDS[n - 1] : undefined;
+  if (aid === undefined) {
+    throw new RangeError(`PA number must be an integer in 1..${PA_AIDS.length}, not ${n}`);
+  }
+  return aid;
+}
+
+/**
+ * Every byte that is a legitimate AID, for `sendAID` to check against.
+ *
+ * The BACKSTOP behind `pfAID`/`paAID`: those two fix the callers that exist, and this makes a bogus
+ * AID unsendable by any caller, including one written later. `0x00` -- the exact value the coercion
+ * above produced -- is not in this set, and neither is `undefined`.
+ *
+ * Built from `AID` itself so a new key added there is accepted without a second edit here. That is
+ * also why this is a `Set` of the values rather than a hand-written list: a list would be the same
+ * drift risk in a new place.
+ */
+export const VALID_AIDS: ReadonlySet<number> = new Set(Object.values(AID));
+
+/**
+ * Short-read AIDs send the AID byte ALONE — no cursor address, no field data.
+ * GA23-0059-07: "During the short-read operation, only an AID byte is
+ * transferred to the application program." x3270's ctlr_read_modified jumps to
+ * rm_done immediately after writing the AID for these four.
+ *
+ * Read Modified All suppresses this (see inbound.ts), and SELECT is NOT a
+ * short read — it sends cursor but no field data.
+ */
+export function isShortReadAID(aid: number): boolean {
+  return aid === AID.CLEAR || aid === AID.PA1 || aid === AID.PA2 || aid === AID.PA3;
+}
+
+/** Field attribute bits (Table 4-4). */
+export const FA = {
+  PRINTABLE: 0xc0,
+  PROTECT: 0x20,
+  NUMERIC: 0x10,
+  INTENSITY: 0x0c,
+  INT_NORM_NSEL: 0x00,
+  INT_NORM_SEL: 0x04,
+  INT_HIGH_SEL: 0x08,
+  INT_ZERO_NSEL: 0x0c,
+  RESERVED: 0x02,
+  MODIFY: 0x01,
+} as const;
+
+/**
+ * WCC bits (Table 3-2). The manual numbers bits 0-7 from the most significant
+ * end, so its "bit 7" (reset MDT) is mask 0x01 and its "bit 1" (reset) is 0x40.
+ */
+export const WCC = {
+  RESET: 0x40,
+  START_PRINTER: 0x08,
+  SOUND_ALARM: 0x04,
+  KEYBOARD_RESTORE: 0x02,
+  RESET_MDT: 0x01,
+} as const;
+
+/**
+ * Maps a 6-bit value to its outbound byte in 12-bit address form.
+ * Matches x3270's code_table in Common/ctlr.c.
+ */
+export const ADDRESS_CODE_TABLE: readonly number[] = [
+  0x40, 0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7,
+  0xc8, 0xc9, 0x4a, 0x4b, 0x4c, 0x4d, 0x4e, 0x4f,
+  0x50, 0xd1, 0xd2, 0xd3, 0xd4, 0xd5, 0xd6, 0xd7,
+  0xd8, 0xd9, 0x5a, 0x5b, 0x5c, 0x5d, 0x5e, 0x5f,
+  0x60, 0x61, 0xe2, 0xe3, 0xe4, 0xe5, 0xe6, 0xe7,
+  0xe8, 0xe9, 0x6a, 0x6b, 0x6c, 0x6d, 0x6e, 0x6f,
+  0xf0, 0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7,
+  0xf8, 0xf9, 0x7a, 0x7b, 0x7c, 0x7d, 0x7e, 0x7f,
+];
+
+/** Default screen geometry for an IBM-3278-2. */
+export const MODEL_2 = { rows: 24, cols: 80 } as const;
+/**
+ * Alternate screen sizes for models 3, 4 and 5, per x3270 `include/3270ds.h:446-453`.
+ *
+ * THESE ARE ALTERNATE SIZES ONLY. Every model's DEFAULT size is model 2's 24x80 --
+ * x3270 sets `ROWS = defROWS = MODEL_2_ROWS` unconditionally (`ctlr.c:341`) and
+ * only `altROWS = maxROWS` varies (`ctlr.c:345`), and `globals.h:196-198` labels
+ * the pair "default (EraseWrite)" and "alternate (EraseWriteAlternate)". So a
+ * model number does not change the screen you get on connect; it changes the
+ * screen the host may switch you to with Erase/Write Alternate.
+ */
+export const MODEL_3 = { rows: 32, cols: 80 } as const;
+export const MODEL_4 = { rows: 43, cols: 80 } as const;
+export const MODEL_5 = { rows: 27, cols: 132 } as const;
+
+export const TERMINAL_TYPE = 'IBM-3278-2-E';

@@ -1,0 +1,17 @@
+# build/test dependencies (reinstall with npm ci)
+node_modules/
+.DS_Store
+# DASD images and chunk output are never committed: scripts build them from the pinned MVS/CE release
+/dasd/*
+!/dasd/manifest/
+# bundles and page build output
+/web/dist*/
+/web/app/dist/
+/dist/
+*.json.gz
+*.cpuprofile
+__pycache__/
+*.pyc
+
+# local build output
+/build/

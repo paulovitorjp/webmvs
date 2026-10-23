@@ -1,0 +1,69 @@
+#
+# MVS/CE v3.0.0 web variant.
+# Derived from the stock MVSCE/conf/local.cnf (conf/mvsce-stock/conf/local.cnf).
+# Run from the web run directory (host: ~/webmvs/dasd/web), all paths are relative:
+#   hercules -n -f ~/webmvs/conf/web.cnf -r ~/webmvs/conf/web.rc
+#
+# Removed from the stock config (the web build does not have them):
+#   REXX MSGP ON                         (Rexx disabled)
+#   SHCMDOPT ENABLE DIAG8, DIAG8CMD ENABLE ECHO (no fork/sh; replaced by SHCMDOPT DISABLE NODIAG8)
+#   INCLUDE conf/local/custom.cnf        (-> nje38.cnf, 0602 TCPNJE needs a network module)
+#   000C/001A 3505 localhost:3505/3506 sockdev readers (need a listening socket), 001C 3505 *
+#   0100.4 / 0310.4 3420 tapes           (hdt3420 is not linked)
+#   0220-0225 2314, 0250 + 0252 3350     (not in the 6-volume web set; 0253 SYSCPK and 0251 WORK00 were added back, see below)
+#   0400.32 3270                         (web: 0400.4)
+#   NUMCPU 2                             (web: 1)
+#   facility HERC_TCPIP_EXTENSION / HERC_TCPIP_PROB_STATE (in the rc file; not enabled in web.rc)
+# Kept although PLAN step 6 does not list them (all handled by modules that the wasm
+# build links: hdt1403 = 1403+3211, hdt3525): 000D 3525 (JES2 PUNCH1), 000F 3211
+# (JES2 PRINTER2), 001D 3525, 0015 1403 (hardcopy log).
+#
+ARCHMODE  S/370
+CPUSERIAL 134001
+CPUMODEL  0148
+MAINSIZE  16
+XPNDSIZE  0
+CNSLPORT  127.0.0.1:3270
+NUMCPU    1
+LOADPARM  ........
+SYSEPOCH  1900
+OSTAILOR  QUIET
+CODEPAGE  819/1047
+TIMERINT  1000
+DEVTMAX   4
+SHCMDOPT  DISABLE NODIAG8
+CCKD      ra=1,raq=4,wr=1,gcint=10
+PANOPT    MSGCOLOR=DARK RATE=250
+# 3270 logo screen shown by Hercules on connect (MVS/CE file, copied into the run dir by
+# scripts/web-ipl.sh prepare). Without it Hercules shows its built-in logo, which does not
+# say "CLEAR the screen or hit ENTER"; VTAM shows the USS logon screen only after CLEAR/ENTER.
+HERCLOGO  herclogo.txt
+#---    ----    --------------------------------- card reader (from a file)
+000C    3505    rdr/rdr00c.txt ascii trunc autopad eof
+# ----------------------------------------------- card punches & printers
+000D    3525    punchcards/pch00d.txt ebcdic          # JES2 PUNCH1
+000E    1403    printers/prt00e.txt                   # JES2 PRINTER1
+000F    3211    printers/prt00f.txt                   # JES2 PRINTER2
+001D    3525    punchcards/pch01d.txt ascii
+# ----------------------------------------------- DASD (web set, shadow files; 8 volumes)
+0150    3350    DASD/mvsres.3350           sf=shadow/mvsres_*.cckd
+0151    3350    DASD/mvs000.3350           sf=shadow/mvs000_*.cckd
+0152    3350    DASD/page00.3350           sf=shadow/page00_*.cckd
+0153    3350    DASD/spool1.3350           sf=shadow/spool1_*.cckd
+0180    3380    DASD/pub000.3380           sf=shadow/pub000_*.cckd
+0190    3390    DASD/pub001.3390 cu=3880   sf=shadow/pub001_*.cckd
+# Not in the minimal 6-volume set; MVS/CE needs them:
+#   SYSCPK: SYS1.PROCLIB(JES2) has PROC00/IEF0PDSI/IEF1PDSI DD UNIT=3350,VOL=SER=SYSCPK,DSN=SYSC.PROCLIB;
+#   without it JES2 stops at IEF244I/IEF238D (operator reply needed).
+0253    3350    DASD/syscpk.3350           sf=shadow/syscpk_*.cckd
+# WORK00 is one of the two storage
+# volumes of VATLST00 (use attribute 0). Without a storage volume every new data set without VOLUME fails:
+# SYS1.CMDPROC(REVINIT) allocates &SYSUID..ISP.PROF NEW at each TSO logon (IBMUSER: IEF238D operator reply;
+# MVSCE01/02: NOT ALLOCATED, VOLUME NOT AVAILABLE). 1,094,964 bytes, almost empty.
+0251    3350    DASD/work00.3350           sf=shadow/work00_*.cckd
+# ----------------------------------------------- consoles
+0010    3270    CONSOLE      # master console (terminal group name; client asks for @0010 or @CONSOLE)
+0009    3215-C  /            # alternate console (required for HAO automation)
+0015    1403    printers/mvslog.txt   # hardcopy of master console
+# ----------------------------------------------- 3270's for TSO
+0400.4  3270

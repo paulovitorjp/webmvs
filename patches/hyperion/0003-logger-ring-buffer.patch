@@ -1,0 +1,226 @@
+diff --git a/logger.c b/logger.c
+index a566af45..a0371fee 100644
+--- a/logger.c
++++ b/logger.c
+@@ -49,6 +49,83 @@ static FILE *logger_hrdcpy;             /* Hardcopy log or zero      */
+ static int   logger_hrdcpyfd;           /* Hardcopt fd or -1         */
+ static char  logger_filename[MAX_PATH];
+ 
++#if defined( __EMSCRIPTEN__ )
++/*-------------------------------------------------------------------*/
++/*  Emscripten: ring buffer in place of the logger pipe              */
++/*-------------------------------------------------------------------*/
++/* Emscripten pipes never block (EAGAIN in PIPEFS, 0 in WasmFS) and  */
++/* stdout cannot be dup2'ed onto a pipe in a useful way, so writers  */
++/* (logmsg.c do_write_pipe) put the bytes into this ring, and the    */
++/* logger thread waits on a condition until bytes are available.     */
++/* stdout and stderr are not redirected (they go to Module.print).   */
++#define LOGGER_RING_SIZE  (256 * 1024)
++static LOCK  ring_lock;
++static COND  ring_cond;
++static char  ring_buf[ LOGGER_RING_SIZE ];
++static int   ring_head = 0;             /* next byte to read         */
++static int   ring_count = 0;            /* bytes in the ring         */
++
++DLL_EXPORT int logger_ring_write( const char* msg, int len )
++{
++    int tries, n, first;
++
++    if (!logger_init_flg || len <= 0)
++        return len <= 0 ? 0 : -1;
++
++    for (tries = 0; tries < 50; tries++)
++    {
++        obtain_lock( &ring_lock );
++        {
++            if (!logger_active)
++            {
++                release_lock( &ring_lock );
++                return -1;
++            }
++            if (LOGGER_RING_SIZE - ring_count >= len)
++            {
++                int tail = (ring_head + ring_count) % LOGGER_RING_SIZE;
++                n = len;
++                first = LOGGER_RING_SIZE - tail;
++                if (first > n) first = n;
++                memcpy( ring_buf + tail, msg, first );
++                if (n > first)
++                    memcpy( ring_buf, msg + first, n - first );
++                ring_count += n;
++                signal_condition( &ring_cond );
++                release_lock( &ring_lock );
++                return len;
++            }
++        }
++        release_lock( &ring_lock );
++        USLEEP( 10000 );    /* logger is backlogged; wait a bit */
++    }
++    return -1;
++}
++
++/* Blocking read of up to 'max' bytes from the ring (logger thread)  */
++static int logger_ring_read( char* buf, int max )
++{
++    int n, first;
++
++    obtain_lock( &ring_lock );
++    {
++        while (!ring_count)
++            wait_condition( &ring_cond, &ring_lock );
++
++        n = ring_count < max ? ring_count : max;
++        first = LOGGER_RING_SIZE - ring_head;
++        if (first > n) first = n;
++        memcpy( buf, ring_buf + ring_head, first );
++        if (n > first)
++            memcpy( buf + first, ring_buf, n - first );
++        ring_head = (ring_head + n) % LOGGER_RING_SIZE;
++        ring_count -= n;
++    }
++    release_lock( &ring_lock );
++    return n;
++}
++#endif /* defined( __EMSCRIPTEN__ ) */
++
+ /*********************************************************************/
+ /*              log_read  -  read system log                         */
+ /*********************************************************************/
+@@ -196,6 +273,9 @@ static int  saved_stdout;
+ 
+ static void logger_redirect()
+ {
++#if defined( __EMSCRIPTEN__ )
++    return;     /* (stdout is not redirected; see logger_ring_write) */
++#endif
+     /* Save current stdout for later */
+     saved_stdout = dup( STDOUT_FILENO );
+ 
+@@ -213,6 +293,9 @@ static void logger_redirect()
+ 
+ DLL_EXPORT void logger_unredirect()
+ {
++#if defined( __EMSCRIPTEN__ )
++    return;     /* (stdout was never redirected) */
++#endif
+     /* Restore stdout */
+     dup2(  saved_stdout, STDOUT_FILENO );
+     close( saved_stdout );
+@@ -341,9 +424,14 @@ static void* logger_thread( void* arg )
+     while
+     (
+         (bytes_read =
++#if defined( __EMSCRIPTEN__ )
++            logger_ring_read
++            (
++#else
+             read_pipe   // read the maximum amount possible
+             (
+                 logger_syslogfd[ LOG_READ ],
++#endif
+                  (logger_buffer  + logger_currmsg),
+                 ((logger_bufsize - logger_currmsg) < LOG_DEFSIZE ?
+                  (logger_bufsize - logger_currmsg) : LOG_DEFSIZE)
+@@ -379,7 +467,11 @@ static void* logger_thread( void* arg )
+         /* If Hercules is not running in No UI mode and panel
+            initialization is not yet complete, write message
+            to stderr so the user can see it on the terminal */
++#if !defined( __EMSCRIPTEN__ ) /* (wasm: embedder gets all msgs via callback) */
+         if (!sysblk.NoUI_mode)
++#else
++        if (0)
++#endif
+         {
+             if (!sysblk.panel_init)
+             {
+@@ -520,11 +612,20 @@ DLL_EXPORT void logger_init( void )
+ 
+     obtain_lock( &logger_lock );
+ 
++#if defined( __EMSCRIPTEN__ )
++    /* No hardcopy from a redirected stdout and no dup2: the embedder
++       (src/wasm/wasm_main.c) gets all messages from the log callback. */
++    initialize_lock( &ring_lock );
++    initialize_condition( &ring_cond );
++    logger_syslog[ LOG_WRITE ] = stderr;
++    if (0)
++#else
+     if (0
+         || fileno( stdin  ) >= 0
+         || fileno( stdout ) >= 0
+         || fileno( stderr ) >= 0
+     )
++#endif
+     {
+         logger_syslog[ LOG_WRITE ] = stderr;
+ 
+@@ -589,10 +690,12 @@ DLL_EXPORT void logger_init( void )
+         if (logger_hrdcpy)
+             setvbuf( logger_hrdcpy, NULL, _IONBF, 0 );
+     }
++#if !defined( __EMSCRIPTEN__ )
+     else
+     {
+         logger_syslog[ LOG_WRITE ] = fopen( "LOG", "a" );
+     }
++#endif
+ 
+     logger_bufsize = LOG_DEFSIZE;
+ 
+@@ -605,6 +708,11 @@ DLL_EXPORT void logger_init( void )
+         exit(1);
+     }
+ 
++#if defined( __EMSCRIPTEN__ )
++    /* No pipe. The write "fd" only has to be non-zero for logmsg.c  */
++    logger_syslogfd[ LOG_READ  ] = -2;
++    logger_syslogfd[ LOG_WRITE ] = -2;
++#else
+     if (create_pipe( logger_syslogfd ))
+     {
+         // "Logger: error in function %s: %s"
+@@ -612,6 +720,7 @@ DLL_EXPORT void logger_init( void )
+         exit(1);  /* Hercules running without syslog */
+     }
+     socket_set_blocking_mode(logger_syslogfd[ LOG_WRITE ], O_NONBLOCK);
++#endif
+ 
+     setvbuf( logger_syslog[ LOG_WRITE ], NULL, _IONBF, 0 );
+ 
+diff --git a/logger.h b/logger.h
+index 216a0f24..2a05a5a2 100644
+--- a/logger.h
++++ b/logger.h
+@@ -65,6 +65,14 @@ extern int logger_syslogfd[2];      // logger pipe file descriptors
+ #define LOG_READ           0        // read  end of logger pipe
+ #define LOG_WRITE          1        // write end of logger pipe
+ 
++#if defined( __EMSCRIPTEN__ )
++/* Emscripten pipes never block, so the logger uses an in-memory     */
++/* ring buffer with a condition variable instead of pipe + dup2.     */
++/* Returns the number of bytes written, or -1 if the logger is not   */
++/* active or stays full (the caller then writes to the screen).      */
++LOGR_DLL_IMPORT int    logger_ring_write( const char* msg, int len );
++#endif
++
+ /*-------------------------------------------------------------------*/
+ 
+ #endif /* __LOGGER_H__ */
+diff --git a/logmsg.c b/logmsg.c
+index 5be09f15..d01a9500 100644
+--- a/logmsg.c
++++ b/logmsg.c
+@@ -239,6 +239,13 @@ static int do_write_pipe( int fd, const char *msg, int len)
+     int retry = 5;
+     int written = 0;
+     int rc;
++#if defined( __EMSCRIPTEN__ )
++    UNREFERENCED( fd );
++    UNREFERENCED( retry );
++    UNREFERENCED( written );
++    rc = logger_ring_write( msg, len );
++    return rc;
++#endif
+     while ((rc = write_pipe( fd, msg, len )) != len && retry--)
+     {
+         if (rc == -1)

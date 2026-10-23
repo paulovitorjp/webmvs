@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=resizes-content">
+<title>webmvs: MVS 3.8J in your browser</title>
+<!-- First script: on hosts without COOP/COEP headers (GitHub Pages) this registers a service worker
+     that adds them, and reloads the page once. It does nothing when the page is already isolated. -->
+<!-- coi-serviceworker 0.1.7 calls doReload() at "updatefound", when the new worker has only started to
+     install. A reload before the worker is active is not intercepted, so that load is not isolated
+     either and the script reloads a second time (3 navigations).
+     This hook (the script's documented window.coi option) reloads once, after the registration has an
+     active worker (navigator.serviceWorker.ready). -->
+<script>
+window.coi = { doReload: function () {
+  if (window.__coiReloading) return;
+  window.__coiReloading = true;
+  navigator.serviceWorker.ready.then(function () { window.location.reload(); });
+} };
+</script>
+<script src="./coi-serviceworker.js"></script>
+<!-- start the big downloads at once. The page loads them later through a chain of
+     imports, fetches and workers (app -> runtime -> persist checks -> Emscripten glue -> wasm -> loader worker
+     -> DASD metadata), one round trip after the other. The bundle (scripts/bundle-hash.py) fills the list
+     with the hashed names; in a dev tree it stays empty. Not on a load that coi-serviceworker reloads (that
+     page is not cross-origin isolated yet, and its requests would be cancelled). -->
+<script>
+(function () {
+  var L = [/*PRELOAD*/];
+  if (!self.crossOriginIsolated) return;
+  for (var i = 0; i < L.length; i++) {
+    var l = document.createElement('link');
+    if (L[i][1] === 'module') l.rel = 'modulepreload';
+    else { l.rel = 'preload'; l.as = 'fetch'; l.crossOrigin = 'anonymous'; }
+    if (L[i][2]) l.setAttribute('fetchpriority', L[i][2]);
+    l.href = L[i][0]; document.head.appendChild(l);
+  }
+})();
+</script>
+<link rel="stylesheet" href="./app.css">
+<link rel="icon" href="data:,">
+</head>
+<body>
+<div id="loader">
+  <div class="loader-box">
+    <h1>MVS 3.8J</h1>
+    <p class="sub">IBM MVS 3.8J on the Hercules emulator, running in this page</p>
+    <div class="bar"><div id="loader-bar" class="indeterminate"></div></div>
+    <p id="loader-text">Loading ...</p>
+    <p class="attrib">Runs <a href="https://github.com/MVS-sysgen/sysgen">MVS/CE</a> by Philip Young, based on Jay Moseley's
+    <a href="http://www.jaymoseley.com/hercules/">MVS 3.8j sysgen</a>. Emulation by
+    <a href="https://github.com/SDL-Hercules-390/hyperion">Hercules Hyperion</a>.</p>
+    <p id="loader-actions" hidden><button id="loader-retry" type="button">Try again</button></p>
+  </div>
+</div>
+
+<div id="app" hidden>
+  <header>
+    <span class="brand">MVS 3.8J</span>
+    <nav id="tabs" role="tablist"><button id="add-tso" class="tab add" title="Open another TSO session" hidden>+</button></nav>
+    <span id="ipl-status" aria-live="polite"></span>
+    <span id="dasd-status" hidden></span>
+    <span id="save-status" role="status" aria-live="polite" hidden></span>
+    <span class="tools">
+      <button id="kbd-btn" class="tool" title="Show the on-screen keyboard (mobile)">Kbd</button>
+      <button id="keys-btn" class="tool" title="3270 keys (Enter, Clear, PA, PF)">Keys</button>
+      <button id="history-btn" class="tool" title="Console history: the master console messages of this machine, also from before the last resume">History</button>
+      <button id="fresh-btn" class="tool" title="Discard the saved machine and start MVS again with an IPL (your disks are kept)" hidden>Start fresh (IPL)</button>
+      <button id="shutdown-top" class="tool" title="Shut down MVS cleanly (JES2 stop, Z EOD, QUIESCE), so that the saved disks are consistent" hidden>Shut down</button>
+      <button id="reset-btn" class="tool" hidden disabled>Reset machine</button>
+      <button id="about-btn" class="tool" title="About and credits">About</button>
+    </span>
+  </header>
+  <main id="views">
+    <section id="history" hidden aria-label="Console history">
+      <div class="history-head"><b>Console history</b> <span id="history-count"></span> <button id="history-close" class="tool">Close</button></div>
+      <pre id="history-text"></pre>
+    </section>
+  </main>
+  <footer class="attrib">webmvs by <a href="https://github.com/paulovitorjp">Paulo Pereira (@paulovitorjp)</a>. Runs <a href="https://github.com/MVS-sysgen/sysgen">MVS/CE</a> by Philip Young, based on Jay Moseley's
+    <a href="http://www.jaymoseley.com/hercules/">MVS 3.8j sysgen</a>. Emulation by
+    <a href="https://github.com/SDL-Hercules-390/hyperion">Hercules Hyperion</a>.</footer>
+  <div id="hint"></div>
+  <div id="keypad" hidden></div>
+  <div id="debug" hidden>
+    <div id="dbgstat"></div>
+    <pre id="herclog"></pre>
+    <form id="hcmd-form"><label>Hercules&gt; <input id="hcmd" autocomplete="off" spellcheck="false"></label></form>
+  </div>
+</div>
+
+<textarea id="kbd-capture" aria-label="3270 keyboard input" autocapitalize="characters" autocomplete="off" autocorrect="off" spellcheck="false"></textarea>
+
+<dialog id="about">
+  <h2>About</h2>
+  <p>This page runs IBM MVS 3.8J on the Hercules System/370 emulator. Two terminals:
+    <b>Console</b> is the MVS master console (device 0010; you see the IPL there and can type operator commands),
+    <b>TSO</b> is a 3270 terminal for TSO (devices 0400-0403).</p>
+  <p>TSO user: <b>MVSCE02</b>, password <b>PASS4U</b>.</p>
+  <table class="keys">
+    <tr><td>Enter</td><td>Enter</td><td>Esc</td><td>Clear</td></tr>
+    <tr><td>F1-F12, Shift+F1-F12</td><td>PF1-PF24</td><td>Ctrl+1 / 2 / 3</td><td>PA1 / PA2 / PA3</td></tr>
+    <tr><td>Ctrl+R</td><td>Reset</td><td>End</td><td>Erase EOF</td></tr>
+    <tr><td>Tab / Shift+Tab</td><td>Next / previous field</td><td>Insert</td><td>Insert mode</td></tr>
+  </table>
+  <h3>Credits</h3>
+  <ul class="credits">
+    <li><a href="https://github.com/SDL-Hercules-390/hyperion">SDL Hercules 4.x Hyperion</a>, Q Public License 1.0
+      (<a href="./licenses/hercules-QPL-1.0.html">license</a>). This page runs a modified Hercules: see the
+      <a href="./SOURCE.txt">source notice</a> (upstream commit, <a href="./source/">patches and new source files</a>).</li>
+    <li><a href="https://github.com/MVS-sysgen/sysgen">MVS/CE</a> (MVS Community Edition), MVS-sysgen project.</li>
+    <li>Based on the MVS 3.8J sysgen by <a href="https://www.jaymoseley.com/hercules/">Jay Moseley</a>. MVS 3.8J is public domain.</li>
+    <li>3270 terminal: <a href="https://github.com/athornton/tn3270">athornton/tn3270</a>, MIT license.</li>
+    <li>3270 font: x3270 3270 font (Paul Mattes, Jeff Sparkes, GTRC), see <a href="./LICENSE-3270-font.txt">license</a>.</li>
+    <li><a href="https://github.com/gzuidhof/coi-serviceworker">coi-serviceworker</a>, MIT license.</li>
+  </ul>
+  <p class="actions"><button id="shutdown-btn" title="Typed on the master console: P TSO, Z NET, $PJES2, Z EOD, QUIESCE">Shut down MVS</button>
+    <button id="about-close" autofocus>Close</button></p>
+</dialog>
+<dialog id="reset-dialog">
+  <h2>Reset machine?</h2>
+  <p>This deletes the disks that are saved in this browser (your data sets, members, spool and logs)
+    and starts again from the original MVS/CE system. It cannot be undone.</p>
+  <p class="actions"><button id="reset-yes">Reset machine</button> <button id="reset-no" autofocus>Cancel</button></p>
+</dialog>
+<dialog id="reset-offer">
+  <h2>MVS did not start</h2>
+  <p id="offer-text"></p>
+  <p class="actions"><button id="offer-reset">Reset machine</button> <button id="offer-wait" autofocus>Keep waiting</button></p>
+</dialog>
+<dialog id="fresh-dialog">
+  <h2>Start fresh?</h2>
+  <p>The page saved your running machine and continued it when you came back. <b>Start fresh</b> discards that
+    saved state, reloads the page and starts MVS again with an IPL. Your disks (data sets, members, spool) stay as
+    they are now; the TSO session and the console messages end. To end TSO work cleanly, use <b>Shut down</b> first.</p>
+  <p class="actions"><button id="fresh-yes">Start fresh (IPL)</button> <button id="fresh-no" autofocus>Cancel</button></p>
+</dialog>
+<dialog id="crash-dialog">
+  <h2>MVS has stopped</h2>
+  <p id="crash-text"></p>
+  <p class="actions"><button id="crash-reload" autofocus>Reload the page</button> <button id="crash-close">Close</button></p>
+</dialog>
+<script type="module" src="./app.js"></script>
+</body>
+</html>

@@ -1,0 +1,48 @@
+diff --git a/crypto.c b/crypto.c
+index 5f10e884..db5b9b09 100644
+--- a/crypto.c
++++ b/crypto.c
+@@ -300,6 +300,27 @@ bool hget_random_bytes( BYTE* buf, size_t amt, HRANDHAND* randhand )
+         arc4random_buf( buf, amt );
+     }
+ 
++#elif defined( USE_GETENTROPY )
++
++    {
++        size_t   chunk, offset = 0;
++
++        while (amt > 0)
++        {
++            chunk = (amt <= MAX_CSRNG_BYTES) ? amt : MAX_CSRNG_BYTES;
++
++            if (getentropy( buf + offset, chunk ) != 0)
++            {
++                // "Crypto: '%s' failed: %s"
++                WRMSG( HHC01494, "E", "getentropy()", strerror( errno ));
++                return false;
++            }
++
++            offset  +=  chunk;
++            amt     -=  chunk;
++        }
++    }
++
+ #elif defined( USE_SYS_GETRANDOM )
+ 
+     {
+diff --git a/hcrypto.h b/hcrypto.h
+index 9da42617..1da0f440 100644
+--- a/hcrypto.h
++++ b/hcrypto.h
+@@ -20,6 +20,11 @@
+     #define NT_SUCCESS(Status) (((NTSTATUS)(Status)) >= 0)
+   #endif
+ 
++#elif defined( __EMSCRIPTEN__ )
++
++  #define USE_GETENTROPY            // getentropy() (crypto.getRandomValues)
++  #define MAX_CSRNG_BYTES           256  // getentropy() limit
++
+ #elif defined( BSD ) || defined( __sun__ )
+ 
+   #define USE_ARC4RANDOM            // (use 'arc4random_buf()' API)

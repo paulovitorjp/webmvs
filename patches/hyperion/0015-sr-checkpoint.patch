@@ -1,0 +1,1754 @@
+webmvs: 'checkpoint' command + suspend/resume (sr.c) fixes. Applies after 0001-0014.
+
+New commands
+  checkpoint <dir> [level=0..9] [wait=ms] [screens=ms] [sync=0|1]
+      Save the running machine without ending Hercules: stop the CPUs (<= 10 s), wait until no I/O is
+      queued or active (wait=, default 10000 ms), then for every CCKD device under its CCKD I/O and file
+      locks: flush the cache, wait for the writes, harden, copy each shadow file to <dir>/<name>; write
+      <dir>/machine.srf (gzip level=, default 1; 0 = uncompressed), start the CPUs again, write
+      <dir>/checkpoint.json last (deleted at the start). Any error: CPUs started again, HHC02031E.
+      Success: HHC02030I with the pause time. screens= limits the 3270 Read Buffer per terminal
+      (default 2000 ms; 0 = do not save the screens).
+  srbuildid [id]   set (config or command) / show the build id written to every .srf
+
+sr.c / console.c / cpu.c fixes
+  - .srf header SR_HDR_BUILD (Hercules version + struct sizes + srbuildid id); resume refuses a file with
+    another (HHC02023E) or no (HHC02024E) build id, before it changes anything
+  - resume reads the whole file first (HHC02028E for a damaged/truncated file; machine unchanged)
+  - started_mask written/read as 8 bytes (16-byte CPU_BITMAP: stock suspend failed, resume left the
+    CPU stopped silently); sr_read_value rejects target sizes other than 1/2/4/8
+  - SR_DEV_SENSE read into dev->sense (was dev->ecw)
+  - CPU timer restored by resume is no longer overwritten by the stopped CPU's saved value (cpu.c)
+  - resume clears the interrupt queue first and queues only the saved pending interrupts (was: every
+    device's ioint/pciioint/attnioint queued, saved queue linked raw); the 3270 resume no longer dequeues
+    the device's restored interrupts (terminals may connect before resume)
+  - 3270 suspend Read Buffer: time limit, and terminal input that MVS has not read yet, or that arrives
+    during the Read Buffer (also in the same recv() as the reply: record boundaries are tracked at each
+    telnet EOR), is kept for MVS; the stock code lost it, and the terminal stayed locked (X SYSTEM)
+  - console connection thread: does not read a terminal while an input record waits for MVS's read
+    (recv_3270_data dropped that record when a Read Buffer reply woke the thread: lost keystroke)
+  - an attention that device_attention rejects (device busy or interrupt pending) is raised again by
+    the connection thread when the device is free (HHC02035I); the stock code dropped it
+  - suspend restarts the CPUs when writing fails; resume closes the file; a resume that fails after it
+    changed the machine configures the CPUs again (HHC02027W); HHC02026I on success
+
+diff --git a/cckddasd.c b/cckddasd.c
+index 29c9a34c..4ce7bc24 100644
+--- a/cckddasd.c
++++ b/cckddasd.c
+@@ -2028,6 +2028,191 @@ DEVBLK         *dev = data;             /* -> device block           */
+     return 0;
+ }
+ 
++/*-------------------------------------------------------------------*/
++/* Checkpoint one CCKD device.                                       */
++/* Called by the 'checkpoint' command (sr.c) while all CPUs are      */
++/* stopped and no channel program is active. Under the device's I/O  */
++/* lock: flush the cache and wait (at most waitms) until no write is */
++/* pending; then also under the file lock: harden (header, L1, free  */
++/* space, OPENED bit off) and copy every shadow file (index 1..sfn)  */
++/* into 'dir'. No CCKD thread (writer, garbage collector, hardener)  */
++/* can write to the file while both locks are held, so each copy is  */
++/* a clean, hardened image (cckdcdsk -3 rc 0).                       */
++/* Returns the number of files copied (0 = read-only device, no      */
++/* shadow), or -1 with a reason in 'err'.                            */
++/*-------------------------------------------------------------------*/
++static int cckd_ckpt_copy_file( int sfd, const char* dst, int dosync,
++                                U64* size, U32* crc, char* err, size_t errlen )
++{
++    struct stat st;
++    BYTE*  buf;
++    int    dfd;
++    U64    off = 0, total;
++    U32    c = crc32( 0L, Z_NULL, 0 );
++
++    if (fstat( sfd, &st ) < 0)
++    {
++        snprintf( err, errlen, "fstat: %s", strerror( errno ));
++        return -1;
++    }
++    total = (U64) st.st_size;
++    if (!(buf = malloc( 256 * 1024 )))
++    {
++        snprintf( err, errlen, "malloc: %s", strerror( errno ));
++        return -1;
++    }
++    dfd = HOPEN( dst, O_WRONLY | O_CREAT | O_TRUNC | O_BINARY, S_IRUSR | S_IWUSR | S_IRGRP );
++    if (dfd < 0)
++    {
++        snprintf( err, errlen, "open %s: %s", dst, strerror( errno ));
++        free( buf );
++        return -1;
++    }
++    while (off < total)
++    {
++        size_t  want = (size_t) MIN( (U64)(256 * 1024), total - off );
++        ssize_t n    = pread( sfd, buf, want, (off_t) off );
++        if (n <= 0)
++        {
++            snprintf( err, errlen, "read: %s", n < 0 ? strerror( errno ) : "short file" );
++            break;
++        }
++        if (write( dfd, buf, (size_t) n ) != n)
++        {
++            snprintf( err, errlen, "write %s: %s", dst, strerror( errno ));
++            break;
++        }
++        c = crc32( c, buf, (uInt) n );
++        off += (U64) n;
++    }
++    free( buf );
++    if (off == total && dosync && fsync( dfd ) < 0)
++    {
++        snprintf( err, errlen, "fsync %s: %s", dst, strerror( errno ));
++        off = total + 1;
++    }
++    if (close( dfd ) < 0 && off == total)
++    {
++        snprintf( err, errlen, "close %s: %s", dst, strerror( errno ));
++        off = total + 1;
++    }
++    if (off != total)
++        return -1;
++    *size = total;
++    *crc  = c;
++    return 0;
++}
++
++DLL_EXPORT int cckd_ckpt_dev( DEVBLK* dev, const char* dir, int dosync,
++                              int waitms, CCKD_CKPT_FILE* out, int maxout,
++                              char* err, size_t errlen )
++{
++CCKD_EXT       *cckd = dev->cckd_ext;
++struct timeval  now;
++struct timespec tm;
++int             i, n = 0, rc = 0;
++
++    if (!cckd)
++    {
++        snprintf( err, errlen, "not a CCKD device" );
++        return -1;
++    }
++    if (dev->cckd64)
++    {
++        snprintf( err, errlen, "CCKD64 devices are not supported" );
++        return -1;
++    }
++
++    gettimeofday( &now, NULL );
++    tm.tv_sec  = now.tv_sec + waitms / 1000;
++    tm.tv_nsec = (now.tv_usec + (waitms % 1000) * 1000) * 1000;
++    if (tm.tv_nsec >= 1000000000) { tm.tv_sec++; tm.tv_nsec -= 1000000000; }
++
++    obtain_lock( &cckd->cckdiolock );
++    if (cckd->merging || cckd->stopping)
++    {
++        release_lock( &cckd->cckdiolock );
++        snprintf( err, errlen, "device is merging or closing" );
++        return -1;
++    }
++
++    /* Write the cached updated tracks and wait for the writers */
++    cckd_flush_cache( dev );
++    while (cckd->wrpending || cckd->cckdioact)
++    {
++        cckd->cckdwaiters++;
++        rc = timed_wait_condition( &cckd->cckdiocond, &cckd->cckdiolock, &tm );
++        cckd->cckdwaiters--;
++        if (rc == ETIMEDOUT && (cckd->wrpending || cckd->cckdioact))
++        {
++            release_lock( &cckd->cckdiolock );
++            snprintf( err, errlen, "%d track writes still pending after %d ms%s",
++                      cckd->wrpending, waitms, cckd->cckdioact ? " (channel program active)" : "" );
++            return -1;
++        }
++        cckd_flush_cache( dev );
++    }
++
++    /* No new write can be scheduled while we hold the I/O lock, and */
++    /* no thread can write to the file while we hold the file lock.  */
++    obtain_lock( &cckd->filelock );
++    {
++        if (cckd->sfn == 0)
++        {
++            if (cckd->open[0] == CCKD_OPEN_RW && !dev->ckdrdonly)
++            {
++                snprintf( err, errlen, "base file is open read-write and there is no shadow file (sf=)" );
++                rc = -1;
++            }
++        }
++        else if (cckd_harden( dev ) < 0)
++        {
++            snprintf( err, errlen, "harden failed" );
++            rc = -1;
++        }
++        else
++        {
++            for (i = 1, rc = 0; i <= cckd->sfn && rc == 0; i++)
++            {
++                const char* sfname = cckd_sf_name( dev, i );
++                const char* base;
++                char        dst[ MAX_PATH ];
++
++                if (n >= maxout)
++                {
++                    snprintf( err, errlen, "too many shadow files" );
++                    rc = -1;
++                    break;
++                }
++                if (!sfname || cckd->fd[i] < 0)
++                {
++                    snprintf( err, errlen, "shadow file %d is not open", i );
++                    rc = -1;
++                    break;
++                }
++                base = strrchr( sfname, '/' );
++                base = base ? base + 1 : sfname;
++                out[n].devnum = dev->devnum;
++                out[n].sfx    = i;
++                STRLCPY( out[n].name, base );
++                STRLCPY( out[n].src,  sfname );
++                snprintf( dst, sizeof( dst ), "%s/%s", dir, out[n].name );
++                if (cckd_ckpt_copy_file( cckd->fd[i], dst, dosync,
++                                         &out[n].size, &out[n].crc, err, errlen ) < 0)
++                {
++                    rc = -1;
++                    break;
++                }
++                n++;
++            }
++        }
++    }
++    release_lock( &cckd->filelock );
++    release_lock( &cckd->cckdiolock );
++
++    return rc < 0 ? -1 : n;
++}
++
+ void cckd_flush_cache_all()
+ {
+ CCKD_EXT       *cckd;                   /* -> cckd extension         */
+diff --git a/cckddasd.h b/cckddasd.h
+index d833a899..123788a1 100644
+--- a/cckddasd.h
++++ b/cckddasd.h
+@@ -235,6 +235,18 @@ CCKD_DLL_IMPORT   bool    cckd_dtax(); // Dump Table At Exit
+ //KD64_DLL_IMPORT void    cckd64_print_itrace();
+ /*-------------------------------------------------------------------*/
+ CCKD_DLL_IMPORT   void   *cckd_sf_add(void *data);
++/* 'checkpoint' command support                                      */
++typedef struct CCKD_CKPT_FILE {
++    U16     devnum;                     /* device number             */
++    int     sfx;                        /* file index (1..sfn)       */
++    char    name[ 256 ];                /* base name in the ckpt dir */
++    char    src[ 1024 ];                /* live file name            */
++    U64     size;                       /* bytes copied              */
++    U32     crc;                        /* zlib crc32 of the copy    */
++} CCKD_CKPT_FILE;
++CCKD_DLL_IMPORT   int     cckd_ckpt_dev( DEVBLK* dev, const char* dir, int dosync,
++                                         int waitms, CCKD_CKPT_FILE* out, int maxout,
++                                         char* err, size_t errlen );
+ CCKD_DLL_IMPORT   void   *cckd_sf_remove(void *data);
+ CCKD_DLL_IMPORT   void   *cckd_sf_comp(void *data);
+ CCKD_DLL_IMPORT   void   *cckd_sf_chk(void *data);
+diff --git a/cmdtab.h b/cmdtab.h
+index 7a329030..a71db704 100644
+--- a/cmdtab.h
++++ b/cmdtab.h
+@@ -1653,6 +1653,19 @@
+ 
+ #define store_cmd_desc          "Store CPU status at absolute zero"
+ #define suspend_cmd_desc        "Suspend hercules"
++#define checkpoint_cmd_desc     "Save the machine state and the CCKD shadows without ending"
++#define checkpoint_cmd_help     \
++                                                                              \
++  "Format: \"checkpoint <dir> [level=n] [wait=ms] [screens=ms] [sync=0|1]\"\n" \
++  "Stops the CPUs, waits for the I/O, flushes and hardens every CCKD\n"         \
++  "device and copies its shadow files to <dir>, writes <dir>/machine.srf\n"     \
++  "(the suspend file), starts the CPUs again and writes\n"                      \
++  "<dir>/checkpoint.json last. level= gzip level 0-9 (default 1), wait= I/O\n"  \
++  "and CCKD write limit (10000), screens= 3270 Read Buffer limit per\n"         \
++  "terminal (2000, 0 = do not save the screens), sync= fsync (1).\n"            \
++  "Resume: copy the shadow files back, start Hercules without IPL, then\n"      \
++  "\"resume <dir>/machine.srf\".\n"
++#define srbuildid_cmd_desc      "Set or show the build id written to and checked in .srf files"
+ #define symptom_cmd_desc        "Alias for traceopt"
+ #define sysclear_cmd_desc       "System Clear Reset manual operation"
+ #define sysclear_cmd_help       \
+@@ -2038,6 +2051,8 @@ COMMAND( "savecore",                savecore_cmd,           SYSCMDNOPER,
+ COMMAND( "script",                  script_cmd,             SYSCMDNOPER,        script_cmd_desc,        script_cmd_help     )
+ COMMAND( "sh",                      sh_cmd,                 SYSCMDNOPER,        sh_cmd_desc,            sh_cmd_help         )
+ COMMAND( "suspend",                 suspend_cmd,            SYSCMDNOPER,        suspend_cmd_desc,       NULL                )
++COMMAND( "checkpoint",              checkpoint_cmd,         SYSCMDNOPER,        checkpoint_cmd_desc,    checkpoint_cmd_help )
++COMMAND( "srbuildid",               srbuildid_cmd,          SYSCMDNOPER,        srbuildid_cmd_desc,     NULL                )
+ COMMAND( "symptom",                 traceopt_cmd,           SYSCMDNOPER,        symptom_cmd_desc,       NULL                )
+ 
+ COMMAND( "tf",                      tf_cmd,                 SYSCMDNOPER,        tf_cmd_desc,            tf_cmd_help         )
+diff --git a/console.c b/console.c
+index ef4f4e30..3733af47 100644
+--- a/console.c
++++ b/console.c
+@@ -182,6 +182,7 @@ static BYTE  loc3270_immed [256] =
+ static int   console_cnslcnt = 0;
+ static void* console_connection_handler( void* arg );
+ static BYTE  solicit_3270_data( DEVBLK* dev, BYTE cmd );
++static BYTE  recv_3270_data( DEVBLK* dev );
+ static void  loc3270_input( TELNET* tn, const BYTE* buffer, U32 size );
+ static void  constty_input( TELNET* tn, const BYTE* buffer, U32 size );
+ static void  negotiate_ttype( TELNET* tn );
+@@ -552,7 +553,14 @@ static void telnet_ev_handler( telnet_t* telnet, telnet_event_t* ev,
+         if (ev->iac.cmd == TELNET_EOR)
+         {
+             if (tn->do_eor)
++            {
+                 tn->got_eor = TRUE;
++                /* record boundaries for the suspend Read              */
++                /* Buffer (two records can come in one recv)          */
++                if (tn->dev && tn->eor_cnt < 4)
++                    tn->eor_pos[ tn->eor_cnt ] = tn->dev->rlen3270;
++                tn->eor_cnt++;
++            }
+         }
+ 
+         /* Break */
+@@ -702,6 +710,19 @@ static void raise_device_attention( DEVBLK* dev, BYTE unitstat )
+         // "%s COMM: device attention %s; rc=%d"
+         CONDEBUG1( HHC90506, "D", dev->tn->clientid,
+             (rc == 0 ? "raised" : "REJECTED"), rc );
++
++        /* rc 1 = device busy or an interrupt pending.               */
++        /* The stock code dropped the attention: the input record    */
++        /* then waited for a read that MVS never issued (terminal    */
++        /* locked). Seen when a checkpoint gives MVS a record that   */
++        /* came during its Read Buffer while a device end was still  */
++        /* pending (CPUs stopped). The connection thread raises it   */
++        /* again when the device is free.                            */
++        if (rc == 1)
++        {
++            dev->tn->attn_owed = unitstat ? unitstat : CSW_ATTN;
++            SIGNAL_CONSOLE_THREAD();
++        }
+     }
+ }
+ 
+@@ -1964,10 +1985,148 @@ static void loc3270_halt_or_clear( DEVBLK* dev )
+ /*-------------------------------------------------------------------*/
+ /*          Hercules Suspend Routine for 3270 devices                */
+ /*-------------------------------------------------------------------*/
++/*-------------------------------------------------------------------*/
++/* Read Buffer for suspend/checkpoint, with a time                   */
++/* limit and without losing terminal input.                          */
++/*                                                                   */
++/* suspend/checkpoint run on the command thread, not in a channel    */
++/* program, so input can be in the way: (1) a record that the        */
++/* connection thread already received but that MVS has not read yet */
++/* (attention pending, readpending set): the stock code overwrote it */
++/* with the Read Buffer reply, so the keystroke was lost and the     */
++/* terminal stayed locked (X SYSTEM); (2) an AID that the user sends */
++/* while our Read Buffer is under way: the stock code took it as the */
++/* reply. Here (1) is saved and put back, and a record that is not a */
++/* Read Buffer reply (AID other than X'60' and shorter than a model 2*/
++/* buffer) is kept and given to MVS as input afterwards (attention). */
++/* Returns 0 = reply in dev->buf, CSW_UC = connection error, 0xFF =  */
++/* no complete reply within ms. *extra = a kept input record or NULL.*/
++/* The caller holds the device lock.                                 */
++/*-------------------------------------------------------------------*/
++#define SR_3270_MIN_RB  (3 + 24 * 80)   /* AID + cursor + 1920 bytes */
++
++/* Take the first complete record out of dev->buf into a new buffer  */
++static BYTE* sr_3270_pop_record( DEVBLK* dev, int* reclen )
++{
++    TELNET* tn = dev->tn;
++    int     len = tn->eor_pos[0], i;
++    BYTE*   rec;
++
++    if (len < 0 || len > (int) dev->rlen3270)
++        len = (int) dev->rlen3270;
++    rec = malloc( len > 0 ? len : 1 );
++
++    if (rec && len > 0)
++        memcpy( rec, dev->buf, len );
++    *reclen = len;
++    memmove( dev->buf, dev->buf + len, dev->rlen3270 - len );
++    dev->rlen3270 -= len;
++    if (tn->eor_cnt > 4)            /* positions lost: assume the rest */
++        tn->eor_cnt = 4;            /* is one complete record          */
++    for (i = 1; i < tn->eor_cnt; i++)
++        tn->eor_pos[i-1] = tn->eor_pos[i] - len;
++    tn->eor_cnt--;
++    if (tn->eor_cnt > 0 && tn->eor_pos[ tn->eor_cnt - 1 ] > (int) dev->rlen3270)
++        tn->eor_pos[ tn->eor_cnt - 1 ] = (int) dev->rlen3270;
++    tn->got_eor = tn->eor_cnt > 0;
++    return rec;
++}
++
++static BYTE  solicit_3270_rb_timed( DEVBLK* dev, int ms, BYTE** reply, int* replylen,
++                                    BYTE** extra, int* extralen )
++{
++    struct timeval  start, now, tv;
++    fd_set          rset;
++    BYTE            status;
++    BYTE*           rec;
++    int             left, rc, len, dropped = 0;
++
++    *reply = NULL; *replylen = 0;
++    *extra = NULL; *extralen = 0;
++    dev->rlen3270     = 0;
++    dev->readpending  = 0;
++    dev->tn->got_eor  = FALSE;
++    dev->tn->eor_cnt  = 0;
++
++    telnet_3270_cmd( dev->tn->ctl, R3270_RB );
++
++    if (dev->tn->send_err)
++    {
++        disconnect_console_device( dev );
++        dev->sense[0] = SENSE_DC;
++        return (CSW_UC);
++    }
++
++    gettimeofday( &start, NULL );
++    for (;;)
++    {
++        /* Sort the complete records: the Read Buffer reply (AID X'60'  */
++        /* or a whole buffer), or user input (AID record) to keep       */
++        while (dev->tn->eor_cnt > 0)
++        {
++            rec = sr_3270_pop_record( dev, &len );
++            if (!rec)
++                continue;
++            if (!*reply && len > 0 && (rec[0] == 0x60 || len >= SR_3270_MIN_RB))
++            {
++                *reply = rec; *replylen = len;
++            }
++            else if (!*extra && len > 0)
++            {
++                *extra = rec; *extralen = len;
++            }
++            else
++            {
++                free( rec );
++                dropped++;
++            }
++        }
++        if (*reply && dev->rlen3270 == 0)
++            break;                      /* reply, no partial record  */
++
++        gettimeofday( &now, NULL );
++        left = ms - (int)((now.tv_sec - start.tv_sec) * 1000
++                        + (now.tv_usec - start.tv_usec) / 1000);
++        if (left <= 0)
++            break;
++        FD_ZERO( &rset );
++        FD_SET( dev->fd, &rset );
++        tv.tv_sec  = left / 1000;
++        tv.tv_usec = (left % 1000) * 1000;
++        rc = select( dev->fd + 1, &rset, NULL, NULL, &tv );
++        if (rc < 0 && HSO_errno == HSO_EINTR)
++            continue;
++        if (rc == 0)
++            break;
++        if (rc < 0)
++            return (BYTE) CSW_UC;
++        dev->readpending = 0;           /* keep what is in dev->buf  */
++        status = recv_3270_data( dev );
++        if (status & CSW_UC)
++        {
++            disconnect_console_device( dev );
++            dev->sense[0] = SENSE_DC;
++            return (CSW_UC);
++        }
++    }
++    if (dropped)
++        // "SR: %04X: 3270 screen not saved: %s"   (here: screen saved, input records dropped)
++        WRMSG( HHC02033, "W", dev->devnum, "more than one terminal input record during Read Buffer; extra ones dropped" );
++    if (dev->rlen3270)
++        WRMSG( HHC02033, "W", dev->devnum, "incomplete terminal input record during Read Buffer dropped" );
++    dev->rlen3270    = 0;
++    dev->readpending = 0;
++    dev->tn->got_eor = FALSE;
++    dev->tn->eor_cnt = 0;
++    return *reply ? 0 : 0xFF;
++}
++
+ static int  loc3270_hsuspend( DEVBLK* dev, void* file )
+ {
+-    size_t  rc, len;
+-    BYTE    buf[ BUFLEN_3270 ];
++    size_t  rc;
++    BYTE   *keep = NULL, *extra = NULL, *reply = NULL;
++    int     keeplen = 0, extralen = 0, replylen = 0, keeppend = 0, raise = 0;
++    int     ms;
+ 
+     if (!dev->connected)
+         return 0;
+@@ -1975,27 +2134,67 @@ static int  loc3270_hsuspend( DEVBLK* dev, void* file )
+     SR_WRITE_VALUE( file, SR_DEV_3270_POS, dev->pos3270, sizeof( dev->pos3270 ));
+     SR_WRITE_VALUE( file, SR_DEV_3270_EWA, dev->ewa3270, 1);
+ 
++    /* 'checkpoint' sets sysblk.sr_ckpt_screen_ms:                    */
++    /* < 0: do not read the screen (the caller keeps it); > 0: wait   */
++    /* at most this many ms for the Read Buffer reply; 0 (suspend):   */
++    /* 60 s (the stock code waited without a limit).                  */
++    if (sysblk.sr_ckpt_screen_ms < 0)
++        return 0;
++    ms = sysblk.sr_ckpt_screen_ms > 0 ? sysblk.sr_ckpt_screen_ms : 60000;
++
+     OBTAIN_DEVLOCK( dev );
+     {
+-        rc = solicit_3270_data( dev, R3270_RB );
++        /* Input that MVS has not read yet: keep it (see above) */
++        if (dev->readpending && dev->rlen3270 > 0 && (keep = malloc( dev->rlen3270 )))
++        {
++            memcpy( keep, dev->buf, dev->rlen3270 );
++            keeplen  = dev->rlen3270;
++            keeppend = dev->readpending;
++        }
+ 
+-        if (1
+-            && rc == 0
+-            && dev->rlen3270 > 0
+-            && dev->rlen3270 <= sizeof( buf )
+-        )
++        rc = solicit_3270_rb_timed( dev, ms, &reply, &replylen, &extra, &extralen );
++
++        /* Put the input back for MVS */
++        if (keep)
+         {
+-            len = dev->rlen3270;
+-            memcpy( buf, dev->buf, len );
++            memcpy( dev->buf, keep, keeplen );
++            dev->rlen3270    = keeplen;
++            dev->readpending = keeppend;
++        }
++        else if (extra && dev->connected)
++        {
++            memcpy( dev->buf, extra, extralen );
++            dev->rlen3270    = extralen;
++            dev->readpending = 3;       /* as the connection thread  */
++            raise = 1;
+         }
+-        else
+-            len = 0;
+     }
+     RELEASE_DEVLOCK( dev );
+ 
+-    if (len)
+-        SR_WRITE_BUF( file, SR_DEV_3270_BUF, buf, (int) len );
+-
++    if (raise)
++        raise_device_attention( dev, CSW_ATTN );
++    if (keep)
++        // "SR: %04X: 3270 input kept for MVS: %s"
++        WRMSG( HHC02034, "I", dev->devnum, "record not yet read by MVS" );
++    else if (raise)
++        WRMSG( HHC02034, "I", dev->devnum, "record received during Read Buffer" );
++    if (keep && extra)
++        // "SR: %04X: 3270 screen not saved: %s"   (here: screen saved, one input record dropped)
++        WRMSG( HHC02033, "W", dev->devnum, "terminal input during Read Buffer dropped (older input pending)" );
++    free( keep );
++    free( extra );
++
++    if (rc == 0xFF)
++        // "SR: %04X: 3270 screen not saved: %s"
++        WRMSG( HHC02033, "W", dev->devnum, "no Read Buffer reply in time" );
++
++    if (reply && replylen > 0 && replylen <= BUFLEN_3270)
++    {
++        rc = sr_write_buf( (FILE*) file, SR_DEV_3270_BUF, reply, (U64) replylen );
++        free( reply );
++        return rc ? -1 : 0;
++    }
++    free( reply );
+     return 0;
+ }
+ 
+@@ -2053,10 +2252,11 @@ static int  loc3270_hresume( DEVBLK* dev, void* file )
+     }
+     while ((key & SR_DEV_MASK) == SR_DEV_3270);
+ 
+-    /* Dequeue any I/O interrupts for this device */
+-    DEQUEUE_IO_INTERRUPT( &dev->ioint );
+-    DEQUEUE_IO_INTERRUPT( &dev->pciioint );
+-    DEQUEUE_IO_INTERRUPT( &dev->attnioint );
++    /* no dequeue here. resume_cmd clears the interrupt               */
++    /* queue before it reads the file (this drops the attention of a  */
++    /* client that connected before resume) and queues exactly the    */
++    /* saved interrupts. Dequeuing here lost a saved I/O interrupt of */
++    /* the 3270 (e.g. channel end of a write VTAM waits for).         */
+ 
+     /* Restore the 3270 screen image if connected and buf was provided */
+     if (1
+@@ -3405,6 +3605,7 @@ const char*   curr_cnslport;            /* Current sysblk.cnslport   */
+ const char*   curr_sysgport = NULL;     /* Current sysblk.sysgport   */
+ 
+ int prev_rlen3270;
++BYTE          owed = 0;                 /* deferred attn              */
+ 
+     UNREFERENCED( arg );
+ 
+@@ -3538,10 +3739,28 @@ int prev_rlen3270;
+                     OBTAIN_DEVLOCK( dev );
+                 }
+ 
++                owed = 0;
+                 if (dev->console && dev->connected)
+                 {
+                     ASSERT( dev->fd >= 0 ); /* (sanity check) */
+ 
++                    /* raise a rejected attention again               */
++                    /* (see raise_device_attention) when the device   */
++                    /* is free; an attention only while its input     */
++                    /* record still waits for MVS                     */
++                    if (1
++                        && dev->tn && dev->tn->attn_owed
++                        && !dev->busy
++                        && !IOPENDING( dev )
++                        && !(dev->scsw.flag3 & SCSW3_SC_PEND)
++                    )
++                    {
++                        owed = dev->tn->attn_owed;
++                        dev->tn->attn_owed = 0;
++                        if (owed == CSW_ATTN && !(dev->readpending == 3 && dev->rlen3270))
++                            owed = 0;
++                    }
++
+                     /* Add it to our read set only if it's
+                        not busy nor interrupt pending
+                     */
+@@ -3549,6 +3768,9 @@ int prev_rlen3270;
+                         && (!dev->busy || (dev->scsw.flag3 & SCSW3_AC_SUSP))
+                         && !IOPENDING( dev )
+                         && !(dev->scsw.flag3 & SCSW3_SC_PEND)
++                        /* not while an input record waits              */
++                        /* for MVS's read (see the post-select test)    */
++                        && !(dev->readpending == 3 && dev->rlen3270)
+                     )
+                     {
+                         FD_SET( dev->fd, &readset );
+@@ -3560,6 +3782,13 @@ int prev_rlen3270;
+ 
+                 RELEASE_DEVLOCK( dev );
+ 
++                if (owed)
++                {
++                    // "COMM: %04X: deferred attention raised again (unit status %02X)"
++                    WRMSG( HHC02035, "I", dev->devnum, owed );
++                    raise_device_attention( dev, owed );
++                }
++
+             } /* end scan DEVBLK chain */
+ 
+             /* Entire DEVBLK chain scanned without any problems? */
+@@ -3821,6 +4050,14 @@ int prev_rlen3270;
+                     || (dev->busy && !(dev->scsw.flag3 & SCSW3_AC_SUSP))
+                     || (dev->scsw.flag3 & SCSW3_SC_PEND)
+                     || IOPENDING( dev )
++                    /* an input record still waits for                */
++                    /* MVS's read. recv_3270_data would discard it    */
++                    /* (it drops a pending record before it reads),   */
++                    /* and then MVS's Read gets no AID: the keystroke */
++                    /* is lost and the terminal stays locked. Seen    */
++                    /* after a checkpoint's Read Buffer, whose reply  */
++                    /* woke this thread.                              */
++                    || (dev->readpending == 3 && dev->rlen3270)
+                     || !FD_ISSET( dev->fd, &readset )
+                     || sysblk.cnslpipe_flag
+                 )
+diff --git a/cpu.c b/cpu.c
+index c6f4d9ca..543cfb1a 100644
+--- a/cpu.c
++++ b/cpu.c
+@@ -1836,6 +1836,13 @@ cpustate_stopping:
+ 
+         sysblk.started_mask |= regs->cpubit;
+         regs->ints_state |= sysblk.ints_state;
++        /* a CPU timer restored by resume while this CPU              */
++        /* was stopped wins over the value saved at the stop          */
++        if (regs->sr_cpu_timer_set)
++        {
++            saved_timer = regs->sr_cpu_timer;
++            regs->sr_cpu_timer_set = 0;
++        }
+         set_cpu_timer(regs,saved_timer);
+ 
+         ON_IC_INTERRUPT(regs);
+diff --git a/hexterns.h b/hexterns.h
+index ec547f0e..46987e86 100644
+--- a/hexterns.h
++++ b/hexterns.h
+@@ -398,6 +398,8 @@ int exec_cmd( int argc, char* argv[], char* cmdline );
+ /* Functions in module sr.c */
+ int suspend_cmd(int argc, char *argv[],char *cmdline);
+ int resume_cmd(int argc, char *argv[],char *cmdline);
++int checkpoint_cmd(int argc, char *argv[],char *cmdline);
++int srbuildid_cmd(int argc, char *argv[],char *cmdline);
+ 
+ /* Functions in module ecpsvm.c that are not *direct* instructions   */
+ /* but rather are instead support functions used by either other     */
+diff --git a/hstructs.h b/hstructs.h
+index 82429749..98e4789f 100644
+--- a/hstructs.h
++++ b/hstructs.h
+@@ -281,6 +281,10 @@ struct REGS {                           /* Processor registers       */
+         TOD     clkc;                   /* 0-7=Clock comparator epoch,
+                                            8-63=Comparator bits 0-55 */
+         S64     cpu_timer;              /* CPU timer                 */
++        S64     sr_cpu_timer;           /* CPU timer set             */
++                                        /* by resume; applied when   */
++                                        /* the stopped CPU starts    */
++        BYTE    sr_cpu_timer_set;       /* 1 = sr_cpu_timer is valid */
+         U32     todpr;                  /* TOD programmable register */
+ 
+         S64     int_timer;              /* S/370 Interval timer      */
+@@ -1053,6 +1057,9 @@ atomic_update64( &sysblk.txf_stats[ contran ? 1 : 0 ].txf_ ## ctr, +1 )
+         U32     ints_state;             /* Common Interrupts Status  */
+         CPU_BITMAP config_mask;         /* Configured CPUs           */
+         CPU_BITMAP started_mask;        /* Started CPUs              */
++        int     sr_ckpt_screen_ms;      /* checkpoint:               */
++                                        /* 3270 Read Buffer timeout  */
++                                        /* ms; <0 = skip; 0 = stock  */
+         CPU_BITMAP waiting_mask;        /* Waiting CPUs              */
+         U16     breakasid;              /* Break ASID                */
+         U64     breakaddr[2];           /* Break address range       */
+@@ -1338,6 +1345,11 @@ struct TELNET {
+         BYTE    send_err;               /* Socket send() failure     */
+         BYTE    overflow;               /* Too much data accumulated */
+         BYTE    overrun;                /* Unexpected extra data     */
++        BYTE    attn_owed;              /* unit status of             */
++                                        /* a rejected attention to   */
++                                        /* raise again (0 = none)    */
++        int     eor_cnt;                /* EORs seen and              */
++        int     eor_pos[4];             /* dev->rlen3270 at each EOR  */
+ };
+ 
+ 
+diff --git a/msgenu.h b/msgenu.h
+index eb69c165..ea7fdb01 100644
+--- a/msgenu.h
++++ b/msgenu.h
+@@ -1373,7 +1373,20 @@ LOGM_DLL_IMPORT int  panel_command_capture( char* cmd, char** resp, bool quiet )
+ #define HHC02020 "SR: value error, incorrect length"
+ #define HHC02021 "SR: string error, incorrect length"
+ #define HHC02022 "SR: error loading CRW queue: not enough memory for %d CRWs"
+-//efine HHC02023 - HHC02099 (available)
++#define HHC02023 "SR: build mismatch: file was written by build '%s', this build is '%s'"
++#define HHC02024 "SR: file has no build id (another Hercules build wrote it); this build is '%s'"
++#define HHC02025 "SR: build id '%s'"
++#define HHC02026 "SR: resume complete; %d CPU(s) started"
++#define HHC02027 "SR: resume failed after the machine was changed; processors configured again, IPL (clear) needed"
++#define HHC02028 "SR: file check failed: %s"
++//efine HHC02029 (available)
++#define HHC02030 "CKPT: %s complete: pause %d ms (stop %d, drain %d, cckd %d, srf %d), srf %"PRIu64" bytes, %d shadow files %"PRIu64" bytes"
++#define HHC02031 "CKPT: %s failed: %s; CPUs restarted"
++#define HHC02032 "CKPT: %s"
++#define HHC02033 "SR: %04X: 3270 screen not saved: %s"
++#define HHC02034 "SR: %04X: 3270 input kept for MVS: %s"
++#define HHC02035 "COMM: %04X: deferred attention raised again (unit status %02X)"
++//efine HHC02036 - HHC02099 (available)
+ 
+ // reserve 021xx: misc
+ #define HHC02100 "Logger: log not active"
+diff --git a/sr.c b/sr.c
+index 621d43ed..7a36451e 100644
+--- a/sr.c
++++ b/sr.c
+@@ -31,6 +31,7 @@
+ #endif
+ 
+ #include "sr.h"     // (must FOLLOW above enable/disable debugging macros)
++#include "cckddasd.h" // cckd_ckpt_dev
+ 
+ #if defined(WORDS_BIGENDIAN)
+ BYTE ourendian = 1;
+@@ -67,101 +68,178 @@ DEVBLK *dev;
+     return NULL;
+ }
+ 
+-int suspend_cmd(int argc, char *argv[],char *cmdline)
++/*-------------------------------------------------------------------*/
++/* Build id, CPU stop/start and                                      */
++/* I/O drain helpers, the shared .srf writer, and 'checkpoint'.      */
++/*-------------------------------------------------------------------*/
++
++/* The build id goes into every .srf (key SR_HDR_BUILD right after   */
++/* SR_HDR_ID). resume refuses a file with another or no build id: a  */
++/* file of another build can be read wrongly without any error (e.g. */
++/* a 16-byte CPU_BITMAP left the CPU stopped). The id = Hercules     */
++/* version + the sizes of the saved structures + an id that the      */
++/* embedder sets with 'srbuildid <id>' (the browser: the sha256 of   */
++/* hercules.wasm).                                                   */
++static char sr_user_build_id[ 129 ] = "";
++
++DLL_EXPORT const char* sr_build_id( char* buf, size_t len )
+ {
+-char    *fn = SR_DEFAULT_FILENAME;
+-SR_FILE  file;
+-CPU_BITMAP started_mask;
+-struct   timeval tv;
+-time_t   tt;
+-int      i, j, rc;
+-REGS    *regs;
+-DEVBLK  *dev;
+-IOINT   *ioq;
+-BYTE     psw[16];
+-
+-    UNREFERENCED(cmdline);
++    snprintf( buf, len, "%s/cpus=%d/bm=%d/regs=%d/dev=%d/sys=%d/ptr=%d%s%s",
++              VERSION, (int) MAX_CPU_ENGS, (int) sizeof( CPU_BITMAP ),
++              (int) sizeof( REGS ), (int) sizeof( DEVBLK ), (int) sizeof( SYSBLK ),
++              (int) sizeof( void* ), sr_user_build_id[0] ? "/id=" : "",
++              sr_user_build_id );
++    return buf;
++}
+ 
++/* srbuildid [id]: set (config file or command) or show the build id */
++int srbuildid_cmd( int argc, char* argv[], char* cmdline )
++{
++    char bid[ 512 ];
++    UNREFERENCED( cmdline );
+     if (argc > 2)
+     {
+         // "SR: too many arguments"
+-        WRMSG(HHC02000, "E");
++        WRMSG( HHC02000, "E" );
+         return -1;
+     }
+-
+     if (argc == 2)
+-        fn = argv[1];
+-
+-    file = SR_OPEN (fn, "wb");
+-    if (file == NULL)
+     {
+-        // "SR: error in function '%s': '%s'"
+-        WRMSG(HHC02001, "E","open()",strerror(errno));
+-        return -1;
++        if (strlen( argv[1] ) >= sizeof( sr_user_build_id ))
++        {
++            WRMSG( HHC02032, "E", "srbuildid: id longer than 128 characters" );
++            return -1;
++        }
++        STRLCPY( sr_user_build_id, argv[1] );
+     }
++    // "SR: build id '%s'"
++    WRMSG( HHC02025, "I", sr_build_id( bid, sizeof( bid )));
++    return 0;
++}
+ 
+-    TRACE("SR: Begin Suspend Processing...\n");
++static int sr_ms_since( const struct timeval* t0 )
++{
++    struct timeval now;
++    gettimeofday( &now, NULL );
++    return (int)((now.tv_sec - t0->tv_sec) * 1000 + (now.tv_usec - t0->tv_usec) / 1000);
++}
+ 
+-    /* Save CPU state and stop all CPU's */
+-    TRACE("SR: Stopping All CPUs...\n");
+-    OBTAIN_INTLOCK(NULL);
+-    started_mask = sysblk.started_mask;
++/* Stop all started CPUs; *mask = the CPUs that were started.        */
++/* timeout_ms < 0: wait forever (stock suspend). Returns -1 on       */
++/* timeout (some CPUs may be stopped: call sr_start_cpus( *mask )).  */
++static int sr_stop_cpus( CPU_BITMAP* mask, int timeout_ms )
++{
++    struct timeval t0;
++    int i;
++
++    gettimeofday( &t0, NULL );
++    OBTAIN_INTLOCK( NULL );
++    *mask = sysblk.started_mask;
+     while (sysblk.started_mask)
+     {
++        if (timeout_ms >= 0 && sr_ms_since( &t0 ) >= timeout_ms)
++        {
++            RELEASE_INTLOCK( NULL );
++            return -1;
++        }
+         for (i = 0; i < sysblk.maxcpu; i++)
+         {
+-            if (IS_CPU_ONLINE(i))
++            if (IS_CPU_ONLINE( i ) && (sysblk.started_mask & CPU_BIT( i )))
+             {
+                 sysblk.regs[i]->cpustate = CPUSTATE_STOPPING;
+-                ON_IC_INTERRUPT(sysblk.regs[i]);
+-                signal_condition(&sysblk.regs[i]->intcond);
++                ON_IC_INTERRUPT( sysblk.regs[i] );
++                signal_condition( &sysblk.regs[i]->intcond );
+             }
+         }
+-        RELEASE_INTLOCK(NULL);
+-        USLEEP(1000);
+-        OBTAIN_INTLOCK(NULL);
++        RELEASE_INTLOCK( NULL );
++        USLEEP( 1000 );
++        OBTAIN_INTLOCK( NULL );
+     }
+-    RELEASE_INTLOCK(NULL);
+-
+-    /* Wait for I/O queue to clear out */
+-
+-    TRACE("SR: Waiting for I/O Queue to clear...\n");
++    RELEASE_INTLOCK( NULL );
++    return 0;
++}
+ 
+-    OBTAIN_IOQLOCK();
++/* Start the CPUs in mask again (after a checkpoint or a failure)   */
++static int sr_start_cpus( CPU_BITMAP mask )
++{
++    int i, n = 0;
++    OBTAIN_INTLOCK( NULL );
++    for (i = 0; i < sysblk.maxcpu; i++)
+     {
+-        while (sysblk.ioq)
++        if (IS_CPU_ONLINE( i ) && (mask & CPU_BIT( i )))
+         {
+-            RELEASE_IOQLOCK();
+-            {
+-                USLEEP( 1000 );
+-            }
+-            OBTAIN_IOQLOCK();
++            sysblk.regs[i]->cpustate = CPUSTATE_STARTED;
++            WAKEUP_CPU( sysblk.regs[i] );
++            n++;
+         }
+     }
+-    RELEASE_IOQLOCK();
++    RELEASE_INTLOCK( NULL );
++    return n;
++}
+ 
+-    /* Wait for active I/Os to complete */
+-    TRACE("SR: Waiting for Active I/Os to Complete...\n");
+-    for (i = 1; i < 5000; i++)
++/* A device with an active channel program (CCW-suspended ones do    */
++/* not count, their state is saved)                                  */
++static DEVBLK* sr_busy_device()
++{
++    DEVBLK* dev;
++    for (dev = sysblk.firstdev; dev; dev = dev->nextdev)
+     {
+-        dev = sr_active_devices();
+-        if (dev == NULL) break;
+-        if (i % 500 == 0)
++        OBTAIN_DEVLOCK( dev );
++        if (dev->busy && !dev->suspended)
+         {
+-            // "SR: waiting for device %04X"
+-            WRMSG(HHC02002, "W", dev->devnum);
++            RELEASE_DEVLOCK( dev );
++            return dev;
+         }
+-        USLEEP(10000);
++        RELEASE_DEVLOCK( dev );
+     }
+-    if (dev != NULL)
++    return NULL;
++}
++
++/* Wait until the I/O queue is empty and no device is busy, at most  */
++/* timeout_ms. Returns 0, or -1 with *busy = the busy device (NULL = */
++/* the queue of requests for device threads is not empty).           */
++static int sr_drain_io( int timeout_ms, DEVBLK** busy )
++{
++    struct timeval t0;
++    DEVBLK* dev;
++    int     queued;
++
++    gettimeofday( &t0, NULL );
++    for (;;)
+     {
+-        // "SR: device %04X still busy, proceeding anyway"
+-        WRMSG(HHC02003, "W",dev->devnum);
++        OBTAIN_IOQLOCK();
++        queued = sysblk.ioq != NULL;
++        RELEASE_IOQLOCK();
++        dev = queued ? NULL : sr_busy_device();
++        if (!queued && !dev)
++            return 0;
++        if (sr_ms_since( &t0 ) >= timeout_ms)
++        {
++            *busy = dev;
++            return -1;
++        }
++        USLEEP( 1000 );
+     }
++}
++
++/* Write the whole machine state (the stock suspend file contents).  */
++/* All CPUs must be stopped and the I/O drained. Returns 0 or -1.    */
++static int sr_write_state( SR_FILE file, CPU_BITMAP started_mask )
++{
++struct   timeval tv;
++time_t   tt;
++int      i, j, rc, nq = 0;
++REGS    *regs;
++DEVBLK  *dev;
++IOINT   *ioq;
++BYTE     psw[16];
++char     bid[ 512 ];
++struct { U16 lcss, devnum; BYTE type; } q[ 256 ];
+ 
+     /* Write header */
+     TRACE("SR: Writing File Header...\n");
+     SR_WRITE_STRING(file, SR_HDR_ID, SR_ID);
++    SR_WRITE_STRING(file, SR_HDR_BUILD, sr_build_id( bid, sizeof( bid )));
+     SR_WRITE_STRING(file, SR_HDR_VERSION, VERSION);
+     gettimeofday(&tv, NULL); tt = tv.tv_sec;
+     SR_WRITE_STRING(file, SR_HDR_DATE, ctime(&tt));
+@@ -169,7 +247,9 @@ BYTE     psw[16];
+     /* Write system data */
+     TRACE("SR: Saving System Data...\n");
+     SR_WRITE_STRING(file,SR_SYS_ARCH_NAME, get_arch_name( NULL ));
+-    SR_WRITE_VALUE (file,SR_SYS_STARTED_MASK,started_mask,sizeof(started_mask));
++    /* always 8 bytes (a 16-byte CPU_BITMAP made the                 */
++    /* stock suspend fail: sr_write_value takes 1, 2, 4 or 8 bytes)  */
++    SR_WRITE_VALUE (file,SR_SYS_STARTED_MASK,(U64)started_mask,sizeof(U64));
+     SR_WRITE_VALUE (file,SR_SYS_MAINSIZE,sysblk.mainsize,sizeof(sysblk.mainsize));
+     TRACE("SR: Saving MAINSTOR...\n");
+     SR_WRITE_BUF   (file,SR_SYS_MAINSTOR,sysblk.mainstor,sysblk.mainsize);
+@@ -194,21 +274,33 @@ BYTE     psw[16];
+     SR_WRITE_VALUE (file,SR_SYS_MBM,sysblk.mbm,sizeof(sysblk.mbm));
+     SR_WRITE_VALUE (file,SR_SYS_MBD,sysblk.mbd,sizeof(sysblk.mbd));
+ 
+-    for (ioq = sysblk.iointq; ioq; ioq = ioq->next)
+-        if (ioq->pcipending)
++    /* copy the interrupt queue under its lock (a                     */
++    /* terminal can queue an attention while the CPUs are stopped).   */
++    /* Information only: resume restores the interrupts from the      */
++    /* SR_DEV_*PENDING flags of each device.                          */
++    OBTAIN_IOINTQLK();
++    for (ioq = sysblk.iointq; ioq && nq < (int)(sizeof(q)/sizeof(q[0])); ioq = ioq->next, nq++)
++    {
++        q[nq].lcss   = SSID_TO_LCSS(ioq->dev->ssid);
++        q[nq].devnum = ioq->dev->devnum;
++        q[nq].type   = ioq->pcipending ? 1 : ioq->attnpending ? 2 : 0;
++    }
++    RELEASE_IOINTQLK();
++    for (i = 0; i < nq; i++)
++        if (q[i].type == 1)
+         {
+-            SR_WRITE_VALUE(file,SR_SYS_PCIPENDING_LCSS, SSID_TO_LCSS(ioq->dev->ssid),sizeof(U16));
+-            SR_WRITE_VALUE(file,SR_SYS_PCIPENDING, ioq->dev->devnum,sizeof(ioq->dev->devnum));
++            SR_WRITE_VALUE(file,SR_SYS_PCIPENDING_LCSS, q[i].lcss,sizeof(U16));
++            SR_WRITE_VALUE(file,SR_SYS_PCIPENDING, q[i].devnum,sizeof(U16));
+         }
+-        else if (ioq->attnpending)
++        else if (q[i].type == 2)
+         {
+-            SR_WRITE_VALUE(file,SR_SYS_ATTNPENDING_LCSS, SSID_TO_LCSS(ioq->dev->ssid),sizeof(U16));
+-            SR_WRITE_VALUE(file,SR_SYS_ATTNPENDING, ioq->dev->devnum,sizeof(ioq->dev->devnum));
++            SR_WRITE_VALUE(file,SR_SYS_ATTNPENDING_LCSS, q[i].lcss,sizeof(U16));
++            SR_WRITE_VALUE(file,SR_SYS_ATTNPENDING, q[i].devnum,sizeof(U16));
+         }
+         else
+         {
+-            SR_WRITE_VALUE(file,SR_SYS_IOPENDING_LCSS, SSID_TO_LCSS(ioq->dev->ssid),sizeof(U16));
+-            SR_WRITE_VALUE(file,SR_SYS_IOPENDING, ioq->dev->devnum,sizeof(ioq->dev->devnum));
++            SR_WRITE_VALUE(file,SR_SYS_IOPENDING_LCSS, q[i].lcss,sizeof(U16));
++            SR_WRITE_VALUE(file,SR_SYS_IOPENDING, q[i].devnum,sizeof(U16));
+         }
+ 
+     SR_WRITE_VALUE ( file, SR_SYS_CRWCOUNT, sysblk.crwcount, sizeof( sysblk.crwcount ));
+@@ -345,7 +437,7 @@ BYTE     psw[16];
+         if (dev->hnd->hsuspend)
+         {
+             rc = (dev->hnd->hsuspend) (dev, file);
+-            if (rc < 0) goto sr_error_exit;
++            if (rc < 0) return -1;
+         }
+         SR_WRITE_HDR(file, SR_DELIMITER, 0);
+     }
+@@ -353,7 +445,96 @@ BYTE     psw[16];
+     TRACE("SR: Writing EOF\n");
+ 
+     SR_WRITE_HDR(file, SR_EOF, 0);
+-    SR_CLOSE (file);
++
++    return 0;
++}
++
++int suspend_cmd(int argc, char *argv[],char *cmdline)
++{
++char    *fn = SR_DEFAULT_FILENAME;
++SR_FILE  file;
++CPU_BITMAP started_mask;
++int      i;
++DEVBLK  *dev;
++
++    UNREFERENCED(cmdline);
++
++    if (argc > 2)
++    {
++        // "SR: too many arguments"
++        WRMSG(HHC02000, "E");
++        return -1;
++    }
++
++    if (argc == 2)
++        fn = argv[1];
++
++    file = SR_OPEN (fn, "wb");
++    if (file == NULL)
++    {
++        // "SR: error in function '%s': '%s'"
++        WRMSG(HHC02001, "E","open()",strerror(errno));
++        return -1;
++    }
++
++    TRACE("SR: Begin Suspend Processing...\n");
++
++    /* Save CPU state and stop all CPU's */
++    TRACE("SR: Stopping All CPUs...\n");
++    sr_stop_cpus( &started_mask, -1 );
++
++    /* Wait for I/O queue to clear out */
++
++    TRACE("SR: Waiting for I/O Queue to clear...\n");
++
++    OBTAIN_IOQLOCK();
++    {
++        while (sysblk.ioq)
++        {
++            RELEASE_IOQLOCK();
++            {
++                USLEEP( 1000 );
++            }
++            OBTAIN_IOQLOCK();
++        }
++    }
++    RELEASE_IOQLOCK();
++
++    /* Wait for active I/Os to complete */
++    TRACE("SR: Waiting for Active I/Os to Complete...\n");
++    for (i = 1; i < 5000; i++)
++    {
++        dev = sr_active_devices();
++        if (dev == NULL) break;
++        if (i % 500 == 0)
++        {
++            // "SR: waiting for device %04X"
++            WRMSG(HHC02002, "W", dev->devnum);
++        }
++        USLEEP(10000);
++    }
++    if (dev != NULL)
++    {
++        // "SR: device %04X still busy, proceeding anyway"
++        WRMSG(HHC02003, "W",dev->devnum);
++    }
++
++    if (sr_write_state( file, started_mask ) < 0)
++    {
++        // "SR: error processing file '%s'"
++        WRMSG(HHC02004, "E", fn);
++        SR_CLOSE (file);
++        /* the stock code left the CPUs stopped here              */
++        sr_start_cpus( started_mask );
++        return -1;
++    }
++    if (SR_CLOSE (file) != 0)
++    {
++        WRMSG(HHC02001, "E", "close()", strerror(errno));
++        WRMSG(HHC02004, "E", fn);
++        sr_start_cpus( started_mask );
++        return -1;
++    }
+ 
+     TRACE("SR: Suspend Complete; shutting down...\n");
+ 
+@@ -361,14 +542,319 @@ BYTE     psw[16];
+     do_shutdown();
+ 
+     return 0;
++}
+ 
+-sr_error_exit:
+-    // "SR: error processing file '%s'"
+-    WRMSG(HHC02004, "E", fn);
+-    SR_CLOSE (file);
++/*-------------------------------------------------------------------*/
++/* checkpoint <dir> [options]                                        */
++/*                                                                   */
++/* Saves the running machine without ending Hercules:                */
++/*   1. stop the CPUs (at most 10 s)                                 */
++/*   2. wait until no I/O is queued or active (wait=, default 10 s)  */
++/*   3. every CCKD device: flush the cache, wait for the writes,     */
++/*      harden, and copy each shadow file to <dir>/<file name>,      */
++/*      all under the device's CCKD I/O and file locks               */
++/*   4. write <dir>/machine.srf (the suspend file; gzip level=)      */
++/*   5. start the CPUs again                                         */
++/*   6. write <dir>/checkpoint.json (written last: the directory is  */
++/*      a valid checkpoint only if it exists and ends with "end")    */
++/* On any error: start the CPUs again, delete nothing that was       */
++/* valid before except <dir>/checkpoint.json (removed at the start), */
++/* message HHC02031E. Success: HHC02030I.                            */
++/* Options: level=0..9 (gzip, 0 = no compression; default 1)         */
++/*          wait=<ms>  (I/O drain and CCKD write limit; 10000)       */
++/*          screens=<ms> (3270 Read Buffer reply limit per terminal, */
++/*                   0 = do not save the screens; default 2000)      */
++/*          sync=0|1   (fsync the files; default 1)                  */
++/*-------------------------------------------------------------------*/
++#define CKPT_MAXFILES 64
++
++static int ckpt_file_crc( const char* path, U64* size, U32* crc, int dosync )
++{
++    BYTE    buf[ 64 * 1024 ];
++    ssize_t n;
++    U32     c = crc32( 0L, Z_NULL, 0 );
++    U64     s = 0;
++    int     fd = HOPEN( path, O_RDONLY | O_BINARY );
++    if (fd < 0)
++        return -1;
++    while ((n = read( fd, buf, sizeof( buf ))) > 0)
++    {
++        c = crc32( c, buf, (uInt) n );
++        s += (U64) n;
++    }
++    if (dosync)
++        fsync( fd );
++    close( fd );
++    if (n < 0)
++        return -1;
++    *size = s;
++    *crc  = c;
++    return 0;
++}
++
++int checkpoint_cmd( int argc, char* argv[], char* cmdline )
++{
++static CCKD_CKPT_FILE files[ CKPT_MAXFILES ];
++char        *dir = NULL;
++int          level = 1, waitms = 10000, screenms = 2000, dosync = 1;
++int          i, n, nfiles = 0, started = 0;
++int          ms_stop = 0, ms_drain = 0, ms_cckd = 0, ms_srf = 0, ms_pause = 0;
++CPU_BITMAP   mask = 0;
++struct timeval t0, tv;
++char         srf[ MAX_PATH ], man[ MAX_PATH ], mode[ 8 ], why[ 1024 ], bid[ 512 ];
++char         err[ 512 ];
++SR_FILE      file;
++DEVBLK      *dev, *busy = NULL;
++U64          srfsize = 0, shbytes = 0;
++U32          srfcrc = 0;
++FILE        *mf;
++
++    UNREFERENCED( cmdline );
++
++    for (i = 1; i < argc; i++)
++    {
++        if      (!strncasecmp( argv[i], "level=",   6 )) level    = atoi( argv[i] + 6 );
++        else if (!strncasecmp( argv[i], "wait=",    5 )) waitms   = atoi( argv[i] + 5 );
++        else if (!strncasecmp( argv[i], "screens=", 8 )) screenms = atoi( argv[i] + 8 );
++        else if (!strncasecmp( argv[i], "sync=",    5 )) dosync   = atoi( argv[i] + 5 ) != 0;
++        else if (!dir && !strchr( argv[i], '=' ))        dir      = argv[i];
++        else
++        {
++            WRMSG( HHC02032, "E", "usage: checkpoint <dir> [level=0..9] [wait=ms] [screens=ms] [sync=0|1]" );
++            return -1;
++        }
++    }
++    if (!dir || level < 0 || level > 9 || waitms < 0 || screenms < 0)
++    {
++        WRMSG( HHC02032, "E", "usage: checkpoint <dir> [level=0..9] [wait=ms] [screens=ms] [sync=0|1]" );
++        return -1;
++    }
++    if (strlen( dir ) > MAX_PATH - 64)
++    {
++        WRMSG( HHC02032, "E", "checkpoint: directory name too long" );
++        return -1;
++    }
++
++    snprintf( srf, sizeof( srf ), "%s/machine.srf", dir );
++    snprintf( man, sizeof( man ), "%s/checkpoint.json", dir );
++
++    if (mkdir( dir, S_IRWXU | S_IRGRP | S_IXGRP ) < 0 && errno != EEXIST)
++    {
++        snprintf( why, sizeof( why ), "mkdir %s: %s", dir, strerror( errno ));
++        WRMSG( HHC02031, "E", dir, why );
++        return -1;
++    }
++    /* The directory is no longer a valid checkpoint from here on */
++    if (unlink( man ) < 0 && errno != ENOENT)
++    {
++        snprintf( why, sizeof( why ), "unlink %s: %s", man, strerror( errno ));
++        WRMSG( HHC02031, "E", dir, why );
++        return -1;
++    }
++
++    gettimeofday( &t0, NULL );
++
++    /* 1. stop the CPUs */
++    if (sr_stop_cpus( &mask, 10000 ) < 0)
++    {
++        snprintf( why, sizeof( why ), "the CPUs did not stop within 10 s" );
++        goto ckpt_fail;
++    }
++    ms_stop = sr_ms_since( &t0 );
++
++    /* 2. drain the I/O */
++    if (sr_drain_io( waitms, &busy ) < 0)
++    {
++        if (busy)
++            snprintf( why, sizeof( why ), "device %04X still busy after %d ms", busy->devnum, waitms );
++        else
++            snprintf( why, sizeof( why ), "I/O requests still queued after %d ms", waitms );
++        goto ckpt_fail;
++    }
++    ms_drain = sr_ms_since( &t0 ) - ms_stop;
++
++    /* 3. CCKD devices: flush, harden, copy the shadow files */
++    for (dev = sysblk.firstdev; dev; dev = dev->nextdev)
++    {
++        if (!dev->allocated)
++            continue;
++        if (dev->cckd_ext)
++        {
++            n = cckd_ckpt_dev( dev, dir, dosync, waitms, files + nfiles,
++                               CKPT_MAXFILES - nfiles, err, sizeof( err ));
++            if (n < 0)
++            {
++                snprintf( why, sizeof( why ), "device %04X: %s", dev->devnum, err );
++                goto ckpt_fail;
++            }
++            for (i = nfiles; i < nfiles + n; i++)
++                shbytes += files[i].size;
++            nfiles += n;
++        }
++        else if (dev->ckdtab && dev->fd >= 0 && !dev->ckdrdonly)
++        {
++            snprintf( why, sizeof( why ), "device %04X: read-write CKD file without CCKD shadow", dev->devnum );
++            goto ckpt_fail;
++        }
++    }
++    ms_cckd = sr_ms_since( &t0 ) - ms_stop - ms_drain;
++
++    /* 4. the machine state */
++    if (level == 0) STRLCPY( mode, "wbT" );
++    else            snprintf( mode, sizeof( mode ), "wb%d", level );
++    if (!(file = SR_OPEN( srf, mode )))
++    {
++        snprintf( why, sizeof( why ), "open %s: %s", srf, strerror( errno ));
++        goto ckpt_fail;
++    }
++    sysblk.sr_ckpt_screen_ms = screenms > 0 ? screenms : -1;
++    n = sr_write_state( file, mask );
++    sysblk.sr_ckpt_screen_ms = 0;
++    if (SR_CLOSE( file ) != 0 || n < 0)
++    {
++        snprintf( why, sizeof( why ), "writing %s failed", srf );
++        goto ckpt_fail;
++    }
++    if (ckpt_file_crc( srf, &srfsize, &srfcrc, dosync ) < 0)
++    {
++        snprintf( why, sizeof( why ), "reading %s back: %s", srf, strerror( errno ));
++        goto ckpt_fail;
++    }
++    ms_srf = sr_ms_since( &t0 ) - ms_stop - ms_drain - ms_cckd;
++
++    /* 5. run again */
++    started = sr_start_cpus( mask );
++    ms_pause = sr_ms_since( &t0 );
++
++    /* 6. the manifest, last */
++    if (!(mf = fopen( man, "w" )))
++    {
++        snprintf( why, sizeof( why ), "open %s: %s", man, strerror( errno ));
++        WRMSG( HHC02031, "E", dir, why );
++        return -1;
++    }
++    gettimeofday( &tv, NULL );
++    fprintf( mf, "{\"format\":\"hercules-checkpoint\",\"version\":1,\n" );
++    fprintf( mf, " \"build\":\"%s\",\n", sr_build_id( bid, sizeof( bid )));
++    fprintf( mf, " \"created\":%"PRId64",\n", (S64) tv.tv_sec * 1000 + tv.tv_usec / 1000 );
++    fprintf( mf, " \"srf\":{\"file\":\"machine.srf\",\"size\":%"PRIu64",\"crc32\":\"%08X\",\"level\":%d},\n",
++             srfsize, srfcrc, level );
++    fprintf( mf, " \"cpusStarted\":%d,\"pauseMs\":%d,\"stopMs\":%d,\"drainMs\":%d,\"cckdMs\":%d,\"srfMs\":%d,\n",
++             started, ms_pause, ms_stop, ms_drain, ms_cckd, ms_srf );
++    fprintf( mf, " \"shadows\":[" );
++    for (i = 0; i < nfiles; i++)
++        fprintf( mf, "%s\n  {\"dev\":\"%04X\",\"sfx\":%d,\"file\":\"%s\",\"src\":\"%s\",\"size\":%"PRIu64",\"crc32\":\"%08X\"}",
++                 i ? "," : "", files[i].devnum, files[i].sfx, files[i].name, files[i].src,
++                 files[i].size, files[i].crc );
++    fprintf( mf, "],\n \"end\":true}\n" );
++    fflush( mf );
++    if (dosync)
++        fsync( fileno( mf ));
++    if (ferror( mf ) | fclose( mf ))
++    {
++        snprintf( why, sizeof( why ), "writing %s failed", man );
++        unlink( man );
++        WRMSG( HHC02031, "E", dir, why );
++        return -1;
++    }
++    if (dosync)
++    {
++        int dfd = open( dir, O_RDONLY );
++        if (dfd >= 0) { fsync( dfd ); close( dfd ); }
++    }
++
++    // "CKPT: %s complete: pause %d ms (stop %d, drain %d, cckd %d, srf %d), srf %"PRIu64" bytes, %d shadow files %"PRIu64" bytes"
++    WRMSG( HHC02030, "I", dir, ms_pause, ms_stop, ms_drain, ms_cckd, ms_srf,
++           srfsize, nfiles, shbytes );
++    return 0;
++
++ckpt_fail:
++    sysblk.sr_ckpt_screen_ms = 0;
++    sr_start_cpus( mask );
++    // "CKPT: %s failed: %s; CPUs restarted"
++    WRMSG( HHC02031, "E", dir, why );
+     return -1;
+ }
+ 
++/*-------------------------------------------------------------------*/
++/* check a whole .srf before resume changes anything:                */
++/* identifier, build id (must be the first key after the id), the    */
++/* main storage size and CPU numbers, and that every unit can be     */
++/* read up to SR_EOF (a truncated or damaged gzip file fails here).  */
++/* Returns 0, -1 (damaged; reason in why) or -2 (build mismatch,     */
++/* message already issued).                                          */
++/*-------------------------------------------------------------------*/
++static int sr_check_file( SR_FILE file, char* why, size_t whylen )
++{
++U32      key = 0, len = 0;
++U64      mainsize = 0;
++int      cpu = 0;
++char     buf[ SR_MAX_STRING_LENGTH + 1 ];
++char     bid[ 512 ];
++
++    snprintf( why, whylen, "read error (damaged or truncated file)" );
++    sr_build_id( bid, sizeof( bid ));
++
++    SR_READ_HDR( file, key, len );
++    if (key != SR_HDR_ID || len > SR_MAX_STRING_LENGTH)
++    {
++        snprintf( why, whylen, "not a suspend/resume file" );
++        return -1;
++    }
++    SR_READ_STRING( file, buf, len );
++    if (strcmp( buf, SR_ID ))
++    {
++        snprintf( why, whylen, "not a suspend/resume file" );
++        return -1;
++    }
++    SR_READ_HDR( file, key, len );
++    if (key != SR_HDR_BUILD || len > SR_MAX_STRING_LENGTH)
++    {
++        // "SR: file has no build id (another Hercules build wrote it); this build is '%s'"
++        WRMSG( HHC02024, "E", bid );
++        return -2;
++    }
++    SR_READ_STRING( file, buf, len );
++    if (strcmp( buf, bid ))
++    {
++        // "SR: build mismatch: file was written by build '%s', this build is '%s'"
++        WRMSG( HHC02023, "E", buf, bid );
++        return -2;
++    }
++    for (;;)
++    {
++        SR_READ_HDR( file, key, len );
++        if (key == SR_EOF)
++            return 0;
++        if ((key & SR_KEY_ID_MASK) != SR_KEY_ID)
++        {
++            snprintf( why, whylen, "invalid key %8.8X", key );
++            return -1;
++        }
++        if (key == SR_SYS_MAINSIZE)
++        {
++            SR_READ_VALUE( file, len, &mainsize, sizeof( mainsize ));
++            if (mainsize > sysblk.mainsize)
++            {
++                snprintf( why, whylen, "mainsize %"PRIu64"M in the file, %"PRIu64"M configured",
++                          mainsize >> 20, (U64) sysblk.mainsize >> 20 );
++                return -1;
++            }
++        }
++        else if (key == SR_CPU)
++        {
++            SR_READ_VALUE( file, len, &cpu, sizeof( cpu ));
++            if (cpu < 0 || cpu >= sysblk.maxcpu)
++            {
++                snprintf( why, whylen, "processor %d in the file, at most %d configurable", cpu, sysblk.maxcpu );
++                return -1;
++            }
++        }
++        else
++            SR_READ_SKIP( file, len );
++    }
++}
++
+ #define SR_NULL_REGS_CHECK(_regs)  if ((_regs) == NULL) goto sr_null_regs_exit;
+ 
+ int resume_cmd(int argc, char *argv[],char *cmdline)
+@@ -379,6 +865,10 @@ U32      key = 0, len = 0;
+ U64      mainsize = 0;
+ U64      xpndsize = 0;
+ CPU_BITMAP started_mask = 0;
++U64      started_mask64 = 0;
++int      changed = 0;                   /* CPUs touched              */
++int      ncpu0 = 0;                     /* CPUs before               */
++char     why[ 256 ];
+ int      i, rc = -1;
+ REGS    *regs = NULL;
+ U16      devnum=0;
+@@ -388,7 +878,6 @@ int      devargc=0;
+ char    *devargv[16];
+ int      devargx=0;
+ DEVBLK  *dev = NULL;
+-IOINT   *ioq = NULL;
+ char     buf[SR_MAX_STRING_LENGTH+1];
+ char     zeros[16];
+ S64      dreg;
+@@ -427,6 +916,26 @@ int      numconfdev=0;
+         return -1;
+     }
+ 
++    /* check the whole file first; on any problem the                 */
++    /* machine is not changed (the caller can IPL instead)            */
++    rc = sr_check_file( file, why, sizeof( why ));
++    SR_CLOSE( file );
++    if (rc < 0)
++    {
++        if (rc == -1)
++            // "SR: file check failed: %s"
++            WRMSG( HHC02028, "E", why );
++        // "SR: error processing file '%s'"
++        WRMSG( HHC02004, "E", fn );
++        return -1;
++    }
++    file = SR_OPEN (fn, "rb");
++    if (file == NULL)
++    {
++        WRMSG(HHC02001, "E", "open()",strerror(errno));
++        return -1;
++    }
++
+     /* First key must be SR_HDR_ID and string must match SR_ID */
+     TRACE("SR: Reading File Header...\n");
+     SR_READ_HDR(file, key, len);
+@@ -440,12 +949,29 @@ int      numconfdev=0;
+ 
+     /* Deconfigure all CPUs */
+     TRACE("SR: Deconfiguring all CPUs...\n");
++    changed = 1;
+     OBTAIN_INTLOCK(NULL);
+     for (i = 0; i < sysblk.maxcpu; i++)
+         if (IS_CPU_ONLINE(i))
++        {
++            ncpu0++;
+             deconfigure_cpu(i);
++        }
+     RELEASE_INTLOCK(NULL);
+ 
++    /* the interrupt state comes from the file only.                  */
++    /* Remove what this Hercules queued before resume (for example    */
++    /* the attention of a terminal that connected before resume).     */
++    OBTAIN_IOINTQLK();
++    for (dev = sysblk.firstdev; dev; dev = dev->nextdev)
++    {
++        dev->pending = dev->pcipending = dev->attnpending = 0;
++        dev->ioint.next = dev->pciioint.next = dev->attnioint.next = NULL;
++    }
++    sysblk.iointq = NULL;
++    RELEASE_IOINTQLK();
++    dev = NULL;
++
+     TRACE("SR: Processing Resume File...\n");
+ 
+     while (key != SR_EOF)
+@@ -467,7 +993,9 @@ int      numconfdev=0;
+             break;
+ 
+         case SR_SYS_STARTED_MASK:
+-            SR_READ_VALUE(file, len, &started_mask, sizeof(started_mask));
++            /* read into 8 bytes (CPU_BITMAP can be 16)              */
++            SR_READ_VALUE(file, len, &started_mask64, sizeof(started_mask64));
++            started_mask = (CPU_BITMAP) started_mask64;
+             break;
+ 
+         case SR_SYS_ARCH_NAME:
+@@ -618,15 +1146,10 @@ int      numconfdev=0;
+             break;
+ 
+         case SR_SYS_IOPENDING:
++            /* information only; the stock code linked                */
++            /* the entries raw (no priority order, no end of chain).  */
++            /* The SR_DEV_*PENDING flags queue them below.            */
+             SR_READ_VALUE(file, len, &hw, sizeof(hw));
+-            dev = find_device_by_devnum(lcss,hw);
+-            if (dev == NULL) break;
+-            if (ioq == NULL)
+-                sysblk.iointq = &dev->ioint;
+-            else
+-                ioq->next = &dev->ioint;
+-            ioq = &dev->ioint;
+-            dev = NULL;
+             lcss = 0;
+             break;
+ 
+@@ -635,15 +1158,10 @@ int      numconfdev=0;
+             break;
+ 
+         case SR_SYS_PCIPENDING:
++            /* information only; the stock code linked                */
++            /* the entries raw (no priority order, no end of chain).  */
++            /* The SR_DEV_*PENDING flags queue them below.            */
+             SR_READ_VALUE(file, len, &hw, sizeof(hw));
+-            dev = find_device_by_devnum(lcss,hw);
+-            if (dev == NULL) break;
+-            if (ioq == NULL)
+-                sysblk.iointq = &dev->pciioint;
+-            else
+-                ioq->next = &dev->pciioint;
+-            ioq = &dev->pciioint;
+-            dev = NULL;
+             lcss = 0;
+             break;
+ 
+@@ -652,15 +1170,10 @@ int      numconfdev=0;
+             break;
+ 
+         case SR_SYS_ATTNPENDING:
++            /* information only; the stock code linked                */
++            /* the entries raw (no priority order, no end of chain).  */
++            /* The SR_DEV_*PENDING flags queue them below.            */
+             SR_READ_VALUE(file, len, &hw, sizeof(hw));
+-            dev = find_device_by_devnum(lcss,hw);
+-            if (dev == NULL) break;
+-            if (ioq == NULL)
+-                sysblk.iointq = &dev->attnioint;
+-            else
+-                ioq->next = &dev->attnioint;
+-            ioq = &dev->attnioint;
+-            dev = NULL;
+             lcss = 0;
+             break;
+ 
+@@ -914,6 +1427,10 @@ int      numconfdev=0;
+             SR_NULL_REGS_CHECK(regs);
+             SR_READ_VALUE(file, len, &dreg, sizeof(S64));
+             set_cpu_timer(regs, dreg);
++            /* the stopped CPU overwrote this value with              */
++            /* the one it saved when it stopped (cpu.c) at its start  */
++            regs->sr_cpu_timer     = dreg;
++            regs->sr_cpu_timer_set = 1;
+             break;
+ 
+         case SR_CPU_CLKC:
+@@ -1213,7 +1730,8 @@ int      numconfdev=0;
+                 WRMSG(HHC02017, "E", dev->devnum, "Sense", len, 32);
+                 goto sr_error_exit;
+             }
+-            SR_READ_BUF(file, &dev->ecw, len);
++            /* was read into dev->ecw              */
++            SR_READ_BUF(file, &dev->sense, len);
+             break;
+ 
+         case SR_DEV_PGSTAT:
+@@ -1266,21 +1784,27 @@ int      numconfdev=0;
+             SR_SKIP_NULL_DEV(dev, file, len);
+             SR_READ_VALUE(file, len, &rc, sizeof(rc));
+             dev->pending = rc;
+-            QUEUE_IO_INTERRUPT(&dev->ioint,FALSE);
++            /* queue only a saved pending interrupt              */
++            if (rc)
++                QUEUE_IO_INTERRUPT(&dev->ioint,FALSE);
+             break;
+ 
+         case SR_DEV_PCIPENDING:
+             SR_SKIP_NULL_DEV(dev, file, len);
+             SR_READ_VALUE(file, len, &rc, sizeof(rc));
+             dev->pcipending = rc;
+-            QUEUE_IO_INTERRUPT(&dev->pciioint,FALSE);
++            /* queue only a saved pending interrupt              */
++            if (rc)
++                QUEUE_IO_INTERRUPT(&dev->pciioint,FALSE);
+             break;
+ 
+         case SR_DEV_ATTNPENDING:
+             SR_SKIP_NULL_DEV(dev, file, len);
+             SR_READ_VALUE(file, len, &rc, sizeof(rc));
+             dev->attnpending = rc;
+-            QUEUE_IO_INTERRUPT(&dev->attnioint,FALSE);
++            /* queue only a saved pending interrupt              */
++            if (rc)
++                QUEUE_IO_INTERRUPT(&dev->attnioint,FALSE);
+             break;
+ 
+         case SR_DEV_STARTPENDING:
+@@ -1398,6 +1922,7 @@ int      numconfdev=0;
+     TRACE("SR: Resuming CPUs...\n");
+     OBTAIN_INTLOCK(NULL);
+     ON_IC_IOPENDING;
++    rc = 0;
+     for (i = 0; i < sysblk.maxcpu; i++)
+         if (IS_CPU_ONLINE(i) && (started_mask & CPU_BIT(i)))
+         {
+@@ -1405,10 +1930,16 @@ int      numconfdev=0;
+             sysblk.regs[i]->cpustate = CPUSTATE_STARTED;
+             sysblk.regs[i]->checkstop = 0;
+             WAKEUP_CPU(sysblk.regs[i]);
++            rc++;
+         }
+     RELEASE_INTLOCK(NULL);
+ 
++    /* the stock code did not close the file              */
++    SR_CLOSE (file);
++
+     TRACE("SR: Resume Complete; System Resumed.\n");
++    // "SR: resume complete; %d CPU(s) started"
++    WRMSG(HHC02026, "I", rc);
+     return 0;
+ 
+ sr_null_regs_exit:
+@@ -1419,6 +1950,20 @@ sr_error_exit:
+     // "SR: error processing file '%s'"
+     WRMSG(HHC02004, "E", fn);
+     SR_CLOSE (file);
++    /* without CPUs the machine could not even IPL              */
++    if (changed)
++    {
++        int online = 0;
++        OBTAIN_INTLOCK(NULL);
++        for (i = 0; i < sysblk.maxcpu; i++)
++            if (IS_CPU_ONLINE(i))
++                online++;
++        for (i = 0; !online && i < (ncpu0 ? ncpu0 : 1) && i < sysblk.maxcpu; i++)
++            configure_cpu(i);
++        RELEASE_INTLOCK(NULL);
++        // "SR: resume failed after the machine was changed; processors configured again, IPL (clear) needed"
++        WRMSG(HHC02027, "W");
++    }
+     return -1;
+ }
+ 
+diff --git a/sr.h b/sr.h
+index 54737189..25d05a1d 100644
+--- a/sr.h
++++ b/sr.h
+@@ -145,6 +145,7 @@
+ #define SR_HDR_ID               0xace00000
+ #define SR_HDR_VERSION          0xace00001
+ #define SR_HDR_DATE             0xace00002
++#define SR_HDR_BUILD            0xace00003  /* build id; must follow SR_HDR_ID              */
+ 
+ #define SR_SYS_MASK             0xfffff000
+ #define SR_SYS_STARTED_MASK     0xace10000
+@@ -826,6 +827,14 @@ U64     value;
+         return -1;
+     }
+ 
++    /* a target of another size (e.g. a 16-byte                       */
++    /* CPU_BITMAP) used to be left unchanged without an error         */
++    if (reslen != 1 && reslen != 2 && reslen != 4 && reslen != 8)
++    {
++        sr_value_error_();
++        return -1;
++    }
++
+     if ((U32)SR_READ(buf, 1, suslen, file) != suslen)
+     {
+         sr_read_error_();

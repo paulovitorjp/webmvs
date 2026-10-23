@@ -1,0 +1,72 @@
+diff --git a/impl.c b/impl.c
+index 47ba16bc..855343de 100644
+--- a/impl.c
++++ b/impl.c
+@@ -964,7 +964,9 @@ static void check_host_instruction_availability()
+ 
+     /* Then report all of the ones that aren't available */
+     // "WARNING: Host does not support the '%s' instruction"
++#if !defined( __EMSCRIPTEN__ )  /* (wasm has no host x86 instructions) */
+     if (!sysblk.have_PCLMULQDQ) WRMSG( HHC00026, "W", "PCLMULQDQ" );
++#endif
+ //  if (!sysblk.have_XXXXXXXXX) WRMSG( HHC00026, "W", "XXXXXXXXX" );
+ }
+ 
+@@ -1274,8 +1276,15 @@ int     rc, maxprio, minprio;
+        flag needs to be set BEFORE logger_init gets called since the
+        "logger_logfile_write()" function relies on its setting.
+     */
++#if !defined( __EMSCRIPTEN__ )
+     if (!isatty(STDERR_FILENO) && !isatty(STDOUT_FILENO))
+         sysblk.NoUI_mode = 1;       /* Leave -n intact */
++#else
++    /* wasm: stdout/stderr are never ttys (Node pipes, browser console),
++       but the embedder (src/wasm/wasm_main.c) is a herclin-style log
++       callback user, not NoUI mode: impl() must return before the rc
++       file runs, and do_shutdown_now() must not call exit() itself. */
++#endif
+ 
+     /* Initialize panel colors */
+     set_panel_colors();
+@@ -1456,7 +1465,15 @@ int     rc, maxprio, minprio;
+ 
+     /* Set default TCP keepalive values */
+ 
+-#if !defined( HAVE_BASIC_KEEPALIVE )
++#if defined( __EMSCRIPTEN__ )
++
++    /* No TCP keepalive in wasm (hostopts.h undefines the HAVE_*_KEEPALIVE
++       values; the 3270 connections are in-process, see wasmsock.c) */
++    sysblk.kaidle = 0;
++    sysblk.kaintv = 0;
++    sysblk.kacnt  = 0;
++
++#elif !defined( HAVE_BASIC_KEEPALIVE )
+ 
+     WARNING("TCP keepalive headers not found; check configure.ac")
+     WARNING("TCP keepalive support will NOT be generated")
+@@ -1616,6 +1633,7 @@ int     rc, maxprio, minprio;
+        to SIGTERM.
+     */
+ 
++#if !defined( __EMSCRIPTEN__ )  /* (no signals reach a wasm module) */
+     /* Register the SIGINT handler */
+     if (signal( SIGINT, sigint_handler ) == SIG_ERR)
+     {
+@@ -1633,6 +1651,7 @@ int     rc, maxprio, minprio;
+         delayed_exit( -1 );
+         return 1;
+     }
++#endif /* !defined( __EMSCRIPTEN__ ) */
+ 
+ #if defined( _MSVC_ )
+     /* Register the Window console ctrl handlers */
+@@ -1682,7 +1701,7 @@ int     rc, maxprio, minprio;
+     }
+ #endif
+ 
+-#if defined( HAVE_DECL_SIGPIPE ) && HAVE_DECL_SIGPIPE
++#if defined( HAVE_DECL_SIGPIPE ) && HAVE_DECL_SIGPIPE && !defined( __EMSCRIPTEN__ )
+     /* Ignore the SIGPIPE signal, otherwise Hercules may terminate with
+        Broken Pipe error if the printer driver writes to a closed pipe */
+     if (signal( SIGPIPE, SIG_IGN ) == SIG_ERR)

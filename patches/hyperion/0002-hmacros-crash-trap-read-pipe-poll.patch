@@ -1,0 +1,51 @@
+diff --git a/hmacros.h b/hmacros.h
+index 77cde1a2..554f0338 100644
+--- a/hmacros.h
++++ b/hmacros.h
+@@ -195,6 +195,33 @@ typedef char _CASSERT_PASTE( assertion_failed_ ## file, line )[ 2 * !!(cond) - 1
+   #define  read_pipe(f,b,n)     recv(f,b,n,0)
+   #define  write_pipe(f,b,n)    send(f,b,(int)n,0)
+   #define  close_pipe(f)        closesocket(f)
++#elif defined( __EMSCRIPTEN__ )
++  /* Emscripten pipes never block: read() of an empty pipe gives
++     EAGAIN (legacy FS) or 0 (WasmFS). RECV_PIPE_SIGNAL expects a
++     blocking 1-byte read after the flag was seen set (the writer
++     sets the flag before it writes the byte), so poll and retry.  */
++  #define  create_pipe(f)       pipe(f)
++  #define  read_pipe(f,b,n)     hw_read_pipe(f,b,n)
++  #define  write_pipe(f,b,n)    write(f,b,n)
++  #define  close_pipe(f)        close(f)
++  static inline ssize_t hw_read_pipe( int fd, void* buf, size_t n )
++  {
++      int tries;
++      ssize_t rc = -1;
++      for (tries = 0; tries < 5000; tries++)  /* (about 5 seconds) */
++      {
++          struct pollfd pfd;
++          rc = read( fd, buf, n );
++          if (rc > 0)
++              return rc;
++          if (rc < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)
++              return rc;
++          pfd.fd = fd; pfd.events = POLLIN; pfd.revents = 0;
++          poll( &pfd, 1, 1 );
++          usleep( 1000 );
++      }
++      return rc;
++  }
+ #else
+   #define  create_pipe(f)       pipe(f)
+   #define  read_pipe(f,b,n)     read(f,b,n)
+@@ -519,7 +546,12 @@ typedef int CMPFUNC(const void*, const void*);
+ /*-------------------------------------------------------------------*/
+ /*      CRASH                       (with hopefully a dump)          */
+ /*-------------------------------------------------------------------*/
++#if defined( __EMSCRIPTEN__ )
++/* A store to address 0 does not trap in wasm linear memory.         */
++#define CRASH()         __builtin_trap()
++#else
+ #define CRASH()         do { BYTE* p=NULL; *p=0; } while (0)
++#endif
+ 
+ /*-------------------------------------------------------------------*/
+ /*      Perform standard utility initialization                      */

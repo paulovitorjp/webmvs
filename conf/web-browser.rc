@@ -1,0 +1,10 @@
+* MVS/CE browser rc = conf/web.rc WITHOUT "IPL 150".
+* web/runtime/mvs-runtime.js sends "ipl 150" itself (hw_command) after this script has ended
+* ("HHC02264I ... processing ended") and the 0010 master console is connected, so the
+* visitor sees the NIP messages on the Console tab. The page answers IEA101A on 0010; the
+* 009 HAO rule below stays as the fallback (it fires only if NIP uses 009).
+facility enable herc_370_extension
+hao tgt input for console 0:0009
+hao cmd /
+hao tgt $HASP426 SPECIFY OPTIONS - HASP-II, VERSION JES2 4.1
+hao cmd /r 0,noreq

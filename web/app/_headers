@@ -1,0 +1,5 @@
+# Cloudflare Pages / Netlify format. GitHub Pages ignores this file (coi-serviceworker.js covers it).
+/*
+  Cross-Origin-Opener-Policy: same-origin
+  Cross-Origin-Embedder-Policy: require-corp
+  Cross-Origin-Resource-Policy: same-origin

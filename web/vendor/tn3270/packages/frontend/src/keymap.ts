@@ -1,0 +1,298 @@
+/**
+ * Terminal byte sequences to NAMED 3270 actions.
+ *
+ * This module decides nothing about 3270 semantics. It answers one question --
+ * "which named action did the user just press?" -- and `Keyboard` in core owns
+ * everything that follows: field-aware typing, tab, EraseEOF, insert mode, and
+ * the keyboard-lock rules. So the action names here are deliberately the same
+ * ones the CLI's command table uses, and adding a key is a table entry.
+ *
+ * ## WHERE THESE SEQUENCES CAME FROM
+ *
+ * All of them were measured with `tput -T xterm-256color <cap>` on the
+ * development box rather than taken from memory or from the plan. Two
+ * corrections to the plan came out of that, both the same shape:
+ *
+ * **The arrow keys and Home have TWO encodings each, and terminfo reports the
+ * one the plan did not.** `tput kcuu1` gives `\x1bOA` (SS3) and `tput khome`
+ * gives `\x1bOH`, while the plan's tests used `\x1b[A` and `\x1b[H` (CSI). Both
+ * are correct: xterm sends CSI in normal cursor mode and SS3 once DECCKM is set,
+ * and `smkx` is exactly `\x1b[?1h\x1b=`. terminfo documents the application-mode
+ * form because it assumes `smkx` has been sent. Since any layer -- us, tmux,
+ * screen -- can flip that mode, BOTH are in the table. Supporting one would lose
+ * the arrow keys outright, depending on the terminal.
+ *
+ * The function keys needed no correction: `kf1`-`kf24` matched the plan exactly,
+ * including the irregularity worth knowing about -- F7-F11 are `18/19/20/21/23~`,
+ * with **no `22~`** -- and shifted Fn is `;2` with PF(n+12), the c3270
+ * convention.
+ *
+ * ## PARTIAL VERSUS NULL IS THE INTERESTING PART
+ *
+ * A lone ESC is both a legal keypress and the first byte of every function key,
+ * so it cannot be resolved from the buffer alone. This module reports that fact
+ * and refuses to guess; `app.ts` owns what happens next -- arming a timer for a
+ * lone ESC just as it does for a genuinely unfinished multi-byte sequence like
+ * `\x1b[`, but PROMOTING it to a Meta prefix for PA1/PA2/PA3 on expiry rather
+ * than discarding it. Guessing here would either eat the following keystroke
+ * or emit a spurious PA.
+ */
+
+import { PF_AIDS } from '@tn3270/core';
+
+export type Action =
+  | { kind: 'pf'; n: number }
+  | { kind: 'pa'; n: number }
+  | { kind: 'enter' }
+  | { kind: 'clear' }
+  | { kind: 'reset' }
+  | { kind: 'up' }
+  | { kind: 'down' }
+  | { kind: 'left' }
+  | { kind: 'right' }
+  | { kind: 'home' }
+  | { kind: 'tab' }
+  | { kind: 'backTab' }
+  | { kind: 'backspace' }
+  | { kind: 'delete' }
+  | { kind: 'eraseEOF' }
+  | { kind: 'eraseInput' }
+  | { kind: 'attn' }
+  | { kind: 'sysreq' }
+  // Dup and Field Mark are TYPED CHARACTERS, not AIDs -- see `applyAction` and
+  // `Keyboard.dup`/`Keyboard.fieldMark` in core.
+  | { kind: 'dup' }
+  | { kind: 'fieldMark' }
+  | { kind: 'toggleInsert' }
+  // NO CHORD, IN EITHER FRONT END, AND THAT IS A MEASURED DECISION RATHER THAN AN OVERSIGHT.
+  // c3270 binds Newline to Ctrl-J in BOTH its keymaps -- `Ctrl<Key>j: Newline()` at
+  // Common/fb-c3270:190 in the non-Windows table a terminal build reads, and `Ctrl <Key>j:
+  // Newline()` at :100 in the _WIN32 one -- but Ctrl-J IS `\n` (0x0a), which `buildTable` below
+  // already maps to `enter` for terminals that send LF for Return. ONE BYTE CANNOT BE BOTH, and
+  // Enter is the AID that submits the screen; quietly turning Return into a cursor move is not a
+  // trade this feature gets to make. x3270's Shift-Return is no help either: terminals do not
+  // report modifiers on Return. Recorded as the user's call on 2026-09-14 --
+  // "leave SysReq and Newline to the keypad, where a button has no spelling problem" --
+  // and this member is the other half of that decision, not a reversal of it: the keypad button
+  // and the TUI overlay are Newline's routes, exactly as they are Sys Req's.
+  | { kind: 'newline' }
+  // Not a 3270 key at all: it shows or hides the front end's own virtual keypad, and
+  // `applyAction` throws on it exactly as it does on `quit`. It lives in this union because
+  // the chord that opens the keypad, the GUI's Alt-K and the `BINDING_INTENT` row must all
+  // name it the way every other action is named.
+  //
+  // NOT because a keypad BUTTON needs it: `KEYPAD_KEYS` must contain neither this nor
+  // `quit`, since a drawn button for either would be a button whose only effect is to throw.
+  | { kind: 'toggleKeypad' }
+  // Opens the front end's file-transfer dialog, and `applyAction` throws on it for the same
+  // reason it throws on `toggleKeypad`: what a dialog looks like is the front end's business.
+  //
+  // THE ONE ACTION THAT CANNOT BE COMPLETED BY THE KEY THAT STARTS IT. Every other member of
+  // this union is self-contained -- an AID, a cursor move, a character -- but a transfer needs
+  // a local path, a direction and a host file name, which is why it opens a form instead of
+  // doing something. That is also why it is the first member `KEYPAD_KEYS` carries despite
+  // `applyAction` throwing on it: unlike `toggleKeypad`, whose button would be a button that
+  // toggles the surface it is drawn on, a transfer button is a perfectly sensible thing to
+  // click -- the front end intercepts it exactly as it intercepts the chord. See the note on
+  // `KeypadKey.action`.
+  | { kind: 'transferForm' }
+  // THE RECTANGLE, NOT THE TEXT, and that is forced rather than chosen: the renderer only ever
+  // receives a `DrawList`, whose `DrawCell` carries a CG-order atlas glyph and NO character
+  // (`canvas/src/drawlist.ts:111-121`). So the front end that holds the `Session` extracts the
+  // text from `resolve(snapshot)`, where `text` and `hidden` both live. Sending coordinates is
+  // also the discipline `keypadButtonCenter` already documents -- it keeps the seam honest.
+  //
+  // `applyAction` THROWS on this, like `quit`, `toggleKeypad` and `transferForm`: what a clipboard
+  // is belongs to the front end, and the GUI has an OS clipboard where the gateway has the
+  // operator's browser.
+  //
+  // SPELLED INLINE AND NOT IMPORTED AS `CellRect`, WHICH IS NOT AN OVERSIGHT: `CellRect` lives in
+  // `@tn3270/canvas`, and the graph is `core <- frontend <- { cli, tui, canvas, gui, web }` --
+  // `frontend` importing from `canvas` would INVERT it and create a cycle (verified from the
+  // package.json files: `canvas` depends on `frontend`, not the reverse). The four fields are
+  // structurally identical, so `extractText(cells, cols, action.rect)` typechecks without a cast.
+  // Do not "tidy" this into an import.
+  | { kind: 'copy'; rect: { top: number; left: number; bottom: number; right: number } }
+  | { kind: 'type'; text: string }
+  | { kind: 'quit' };
+
+/**
+ * Sentinel: these bytes are a valid PREFIX of a longer sequence, so the caller
+ * must wait for more input rather than acting or discarding.
+ *
+ * Returning `null` instead would conflate "wait" with "impossible", and the
+ * caller's two correct responses to those are opposite: keep buffering, versus
+ * throw the bytes away. A bare ESC is the case that matters -- it is a legal key
+ * AND the start of every function key, and this module cannot tell them apart
+ * from bytes alone. app.ts owns what happens next -- timing it out the same as
+ * an unfinished sequence, but promoting it to a Meta prefix on expiry rather
+ * than discarding it; this module stays pure.
+ */
+export const PARTIAL = Symbol('partial');
+
+/**
+ * The PF sequences, `tput kf1`..`kf24`. PF(n) for F(n), PF(n+12) for Shift+F(n).
+ * Note the gap: there is no `22~`.
+ */
+const PF_KEYS: readonly (readonly [string, number])[] = [
+  ['\x1bOP', 1], ['\x1bOQ', 2], ['\x1bOR', 3], ['\x1bOS', 4],
+  ['\x1b[15~', 5], ['\x1b[17~', 6], ['\x1b[18~', 7], ['\x1b[19~', 8],
+  ['\x1b[20~', 9], ['\x1b[21~', 10], ['\x1b[23~', 11], ['\x1b[24~', 12],
+  ['\x1b[1;2P', 13], ['\x1b[1;2Q', 14], ['\x1b[1;2R', 15], ['\x1b[1;2S', 16],
+  ['\x1b[15;2~', 17], ['\x1b[17;2~', 18], ['\x1b[18;2~', 19], ['\x1b[19;2~', 20],
+  ['\x1b[20;2~', 21], ['\x1b[21;2~', 22], ['\x1b[23;2~', 23], ['\x1b[24;2~', 24],
+];
+
+function buildTable(): Map<string, Action> {
+  const t = new Map<string, Action>();
+  for (const [seq, n] of PF_KEYS) t.set(seq, { kind: 'pf', n });
+
+  // Cursor keys and Home, BOTH encodings -- see the header note on DECCKM.
+  t.set('\x1b[A', { kind: 'up' });
+  t.set('\x1b[B', { kind: 'down' });
+  t.set('\x1b[C', { kind: 'right' });
+  t.set('\x1b[D', { kind: 'left' });
+  t.set('\x1bOA', { kind: 'up' });
+  t.set('\x1bOB', { kind: 'down' });
+  t.set('\x1bOC', { kind: 'right' });
+  t.set('\x1bOD', { kind: 'left' });
+  t.set('\x1b[H', { kind: 'home' });
+  t.set('\x1bOH', { kind: 'home' });
+
+  t.set('\x1b[Z', { kind: 'backTab' });   // tput kcbt
+  t.set('\x1b[3~', { kind: 'delete' });   // tput kdch1
+  t.set('\x7f', { kind: 'backspace' });   // tput kbs
+  t.set('\t', { kind: 'tab' });
+  t.set('\r', { kind: 'enter' });
+  t.set('\n', { kind: 'enter' });         // some terminals send LF for Return
+
+  // `\x1b[4~` is vt220 Select/End. Bound to EraseEOF as a deliberate CHOICE,
+  // following c3270; it is not a terminfo-derived mapping.
+  t.set('\x1b[4~', { kind: 'eraseEOF' });
+
+  // The Insert key toggles insert mode, as x3270 does (fb-x3270:210). MEASURED:
+  // `tput kich1` is `\x1b[2~` on the development box.
+  t.set('\x1b[2~', { kind: 'toggleInsert' });
+
+  // Control keys. Ctrl-C is Clear, not interrupt: Clear is an AID a 3270 user
+  // needs constantly (it dismisses MORE...), and Ctrl-] is the way out.
+  // Attn is c3270's Ctrl-A (Common/fb-c3270:83). It is a Telnet BREAK, not an AID.
+  t.set('\x01', { kind: 'attn' });
+  t.set('\x03', { kind: 'clear' });
+  t.set('\x12', { kind: 'reset' });
+  t.set('\x15', { kind: 'eraseInput' });
+  t.set('\x1d', { kind: 'quit' });
+
+  // Dup and Field Mark are c3270's own Ctrl-D and Ctrl-F, and BOTH of its keymaps agree:
+  // `Ctrl<Key>d: Dup()` / `Ctrl<Key>f: FieldMark()` at Common/fb-c3270:186-187 (the
+  // non-Windows table, which a terminal build reads) and the same pair at :88 and :93 in the
+  // _WIN32 one. They are TYPED CHARACTERS, not AIDs -- see the note on the Action union.
+  t.set('\x04', { kind: 'dup' });
+  t.set('\x06', { kind: 'fieldMark' });
+  // The keypad/overlay toggle, ALSO c3270's own: `Ctrl<Key>k: Keypad()`, fb-c3270:191. Its
+  // _WIN32 keymap spells the same command Alt-K (:48), which would arrive here as `ESC k` --
+  // and new bindings do not go down the ESC path, whose two regressions are recorded in
+  // app.ts. The canvas front ends, which read a real KeyboardEvent and so have no ESC
+  // ambiguity, accept both. Sys Req gets NO chord: c3270 defines none in either keymap, which
+  // is why the TUI's overlay is its only keyboard route.
+  t.set('\x0b', { kind: 'toggleKeypad' });
+  // The transfer form. NOT c3270's -- it binds no transfer key at all, in either half of
+  // fb-c3270, so there is no reference spelling to match and the choice is ours. `0x14` is free
+  // in both of its keymaps and was free here: the control bytes this table already takes are
+  // 01 03 04 06 0b 12 15 1d 7f.
+  t.set('\x14', { kind: 'transferForm' });
+
+  // The PA keys have no terminal equivalent, so ESC-digit, as c3270 does.
+  t.set('\x1b1', { kind: 'pa', n: 1 });
+  t.set('\x1b2', { kind: 'pa', n: 2 });
+  t.set('\x1b3', { kind: 'pa', n: 3 });
+  return t;
+}
+
+const TABLE: ReadonlyMap<string, Action> = buildTable();
+
+/** Every prefix of every table key, so PARTIAL is a lookup and not a scan. */
+const PREFIXES: ReadonlySet<string> = (() => {
+  const s = new Set<string>();
+  for (const key of TABLE.keys()) {
+    for (let i = 1; i < key.length; i++) s.add(key.slice(0, i));
+  }
+  return s;
+})();
+
+/** Printable ASCII, the only thing a 3270 field accepts as typed text. */
+function isPrintable(b: number): boolean {
+  return b >= 0x20 && b <= 0x7e;
+}
+
+/**
+ * How many leading bytes are printable ASCII; 0 if the first one is not.
+ *
+ * Exported so `app.ts` can consume a typed run in one pass instead of probing
+ * prefix by prefix, which is O(n^2) on a paste. The printability rule stays here,
+ * with the table, rather than being restated by the caller.
+ */
+export function printableRun(bytes: Uint8Array): number {
+  let n = 0;
+  while (n < bytes.length && isPrintable(bytes[n]!)) n++;
+  return n;
+}
+
+/**
+ * The longest sequence in the table, so a caller can bound its prefix scan.
+ *
+ * DERIVED, not written down: a longer key added below raises this automatically,
+ * where a literal 7 would silently stop matching the new key's last byte.
+ */
+export const MAX_SEQUENCE_LENGTH: number =
+  Math.max(...[...TABLE.keys()].map((k) => k.length));
+
+/**
+ * The action for a buffer of terminal input.
+ *
+ * `PARTIAL` means "a longer sequence may still arrive"; `null` means "discard".
+ * The caller must treat those differently -- see the note on PARTIAL.
+ */
+export function lookup(bytes: Uint8Array): Action | typeof PARTIAL | null {
+  // An empty buffer is not a prefix of anything; returning PARTIAL here would
+  // park the reader in a waiting state that only a timeout could leave.
+  if (bytes.length === 0) return null;
+
+  const seq = String.fromCharCode(...bytes);
+  const exact = TABLE.get(seq);
+  if (exact !== undefined) return exact;
+
+  // A complete match is checked FIRST, so a key that is also a live prefix
+  // resolves rather than waits.
+  //
+  // NO TEST CAN CURRENTLY PIN THIS ORDER, verified by mutation: swapping these
+  // two blocks leaves all 25 tests green, because no key in TABLE is a proper
+  // prefix of another one. (The near misses are not prefixes: `\x1b[15~` and
+  // `\x1b[15;2~` diverge at `~` versus `;`, and PA1's `\x1b1` differs from
+  // `\x1b[1;2P` at the second byte.) The order is kept because it becomes
+  // load-bearing the moment a terminal needs a key that IS a prefix of another
+  // -- then exact-first is the difference between acting and hanging until the
+  // ESC timer fires. Do not write a test claiming to pin it as it stands.
+  if (PREFIXES.has(seq)) return PARTIAL;
+
+  // A run of printable bytes is typed text. Handling the whole run rather than
+  // one byte keeps paste working without the caller re-entering per byte.
+  let printable = true;
+  for (const b of bytes) {
+    if (!isPrintable(b)) { printable = false; break; }
+  }
+  if (printable) return { kind: 'type', text: seq };
+
+  return null;
+}
+
+/**
+ * Is this a PF number the architecture defines? Guards a hand-built action.
+ *
+ * The upper bound is `PF_AIDS.length`, NOT a literal 24: core's table of AID
+ * bytes is the authority on how many PF keys exist, and a second hardcoded 24
+ * here would be a copy to keep in step for no benefit.
+ */
+export function isValidPf(n: number): boolean {
+  return Number.isInteger(n) && n >= 1 && n <= PF_AIDS.length;
+}

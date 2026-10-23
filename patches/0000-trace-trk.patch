@@ -1,0 +1,52 @@
+diff --git a/cckddasd.c b/cckddasd.c
+index c279da31..a118e7ef 100644
+--- a/cckddasd.c
++++ b/cckddasd.c
+@@ -1210,6 +1210,38 @@ CCKD_L2ENT      l2;                     /* Copied level 2 entry      */
+     return (L1idx * 256 + l2x + CFBA_BLKS_PER_GRP) / CFBA_BLKS_PER_GRP;
+ }
+ 
++/*-------------------------------------------------------------------*/
++/* Track trace (patches/0000-trace-trk.patch).                       */
++/* If env HERC_TRK_TRACE names a file, append one line for each      */
++/* track image that cckd_read_trk reads from the image file (cache   */
++/* miss): "epoch_sec.usec,DEVN,trk,ra"   (ra 0 = i/o thread,         */
++/* ra > 0 = readahead thread). Not for production builds.            */
++/*-------------------------------------------------------------------*/
++static void cckd_trk_trace( U16 devnum, int trk, int ra )
++{
++    static pthread_mutex_t  trc_mtx  = PTHREAD_MUTEX_INITIALIZER;
++    static FILE*            trc_fp   = NULL;
++    static int              trc_init = 0;
++    struct timespec         ts;
++
++    pthread_mutex_lock( &trc_mtx );
++    if (!trc_init)
++    {
++        const char* fn = getenv( "HERC_TRK_TRACE" );
++        trc_init = 1;
++        if (fn && *fn)
++            trc_fp = fopen( fn, "a" );
++    }
++    if (trc_fp)
++    {
++        clock_gettime( CLOCK_REALTIME, &ts );
++        fprintf( trc_fp, "%ld.%06ld,%4.4X,%d,%d\n", (long) ts.tv_sec,
++                 (long) (ts.tv_nsec / 1000), devnum, trk, ra );
++        fflush( trc_fp );
++    }
++    pthread_mutex_unlock( &trc_mtx );
++}
++
+ /*-------------------------------------------------------------------*/
+ /* Read a track image                                                */
+ /*                                                                   */
+@@ -1379,6 +1411,8 @@ cckd_read_trk_retry:
+     /* Clear the buffer if batch mode */
+     if (dev->batch) memset(buf, 0, maxlen);
+ 
++    cckd_trk_trace( dev->devnum, trk, ra );   /* track trace */
++
+     /* Read the track image */
+     obtain_lock( &cckd->filelock );
+     {

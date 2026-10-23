@@ -1,0 +1,56 @@
+diff --git a/clock.c b/clock.c
+index 95abbee5..bee97f8f 100644
+--- a/clock.c
++++ b/clock.c
+@@ -566,15 +566,51 @@ void ARCH_DEP( fetch_int_timer )( REGS* regs )
+ /*  host_ETOD - Primary high-resolution clock fetch and conversion   */
+ /*-------------------------------------------------------------------*/
+ 
++#if defined( __EMSCRIPTEN__ )
++/* Emscripten CLOCK_REALTIME is Date.now() (1 ms resolution), but     */
++/* CLOCK_MONOTONIC is performance.now() (microseconds or better).    */
++/* Use the monotonic clock plus a fixed offset to the epoch, taken   */
++/* one time at the first call. (A browser tab that sleeps keeps the  */
++/* monotonic clock consistent; no host hibernate issue here.)        */
++static pthread_once_t   host_ETOD_once = PTHREAD_ONCE_INIT;
++static struct timespec  host_ETOD_offset;     /* realtime - monotonic */
++
++static void host_ETOD_init( void )
++{
++    struct timespec rt, mono;
++    clock_gettime( CLOCK_REALTIME,  &rt   );
++    clock_gettime( CLOCK_MONOTONIC, &mono );
++    host_ETOD_offset.tv_sec  = rt.tv_sec  - mono.tv_sec;
++    host_ETOD_offset.tv_nsec = rt.tv_nsec - mono.tv_nsec;
++    if (host_ETOD_offset.tv_nsec < 0)
++    {
++        host_ETOD_offset.tv_nsec += 1000000000L;
++        host_ETOD_offset.tv_sec  -= 1;
++    }
++}
++#endif
++
+ ETOD* host_ETOD( ETOD* ETOD )
+ {
+     struct timespec time;
+ 
++#if defined( __EMSCRIPTEN__ )
++    pthread_once( &host_ETOD_once, host_ETOD_init );
++    clock_gettime( CLOCK_MONOTONIC, &time );
++    time.tv_sec  += host_ETOD_offset.tv_sec;
++    time.tv_nsec += host_ETOD_offset.tv_nsec;
++    if (time.tv_nsec >= 1000000000L)
++    {
++        time.tv_nsec -= 1000000000L;
++        time.tv_sec  += 1;
++    }
++#else
+     /* Should use CLOCK_MONOTONIC + adjustment, but host sleep/hibernate
+      * destroys consistent monotonic clock.
+      */
+ 
+     clock_gettime( CLOCK_REALTIME, &time );
++#endif
+     timespec2ETOD( ETOD, &time );
+     return ( ETOD );                /* Return address of result      */
+ }

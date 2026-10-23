@@ -1,0 +1,27 @@
+diff --git a/hscutl.c b/hscutl.c
+index 870e6792..4c53ed6a 100644
+--- a/hscutl.c
++++ b/hscutl.c
+@@ -2592,7 +2592,9 @@ DLL_EXPORT bool are_big_endian()
+ 
+ #if !defined( _MSVC_ ) // Linux, etc..
+ 
++#if !defined( __EMSCRIPTEN__ )  /* (no sys/ptrace.h in Emscripten) */
+ #include <sys/ptrace.h>
++#endif
+ 
+ #if defined( __APPLE__ ) || defined( __FreeBSD__ )
+   #include <sys/sysctl.h>
+@@ -2671,6 +2673,12 @@ static bool IsDebuggerPresent()
+ 
+     return debugger_is_present;
+ 
++#elif defined( __EMSCRIPTEN__ )
++
++    // WebAssembly: no process tracing
++
++    return false;
++
+ #endif
+ 
+ } // IsDebuggerPresent

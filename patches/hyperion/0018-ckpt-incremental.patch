@@ -1,0 +1,1318 @@
+webmvs patch 0018: incremental checkpoints. On top of 0001-0008, 0011-0015, 0017.
+- cckddasd.c/cckd.h: a bitmap per CCKD file of the 4 KB blocks written since the last full checkpoint copy
+  (cckd_write, cut part of cckd_ftruncate); cckd_ckpt_dev() copies (full) or writes the marked blocks into one
+  delta file (shadows.dlt); helpers for sr.c.
+- sr.c: checkpoint <dir> incr=1 base=<full dir> [maxdelta=%] [maxshadow=%] [verify=1]: a delta = the pages of
+  main storage whose XXH64 differs from the base (SR_SYS_MSBASE + SR_SYS_MSDELTA in machine.srf) + shadows.dlt;
+  full when there is no tracked base or the delta is too large. The read-back crc32 and the fsyncs of the .srf
+  and of the delta file run after the CPUs are started again. resume <file> track=1 adopts the resumed
+  checkpoint's base. sr_ckpt_progress counts ended checkpoints (lock-free wait in the page's pagehide).
+- msgenu.h: HHC02030I gets the kind (full/delta) at the end. sr.h: the two new keys.
+QPL 1.0: a modification of SDL Hercules Hyperion, distributed as a separate patch.
+
+diff --git a/cckd.h b/cckd.h
+index efef3ba1..ee8999ea 100644
+--- a/cckd.h
++++ b/cckd.h
+@@ -460,7 +460,14 @@ struct CCKD_EXT {                       /* Ext for compressed ckd    */
+         int              writes[CCKD_MAX_SF+1];  /* Nbr track writes */
+         CCKD_L1ENT      *L1tab[CCKD_MAX_SF+1];   /* Level 1 tables   */
+         CCKD_DEVHDR      cdevhdr[CCKD_MAX_SF+1]; /* cckd device hdr  */
++        /* blocks written since the last full checkpoint                */
++        U32*             ckmap[CCKD_MAX_SF+1];   /* bitmap, 4K blocks */
++        BYTE             ckover[CCKD_MAX_SF+1];  /* not tracked fully */
++        BYTE             ckbase[CCKD_MAX_SF+1];  /* map has a base    */
+ };
++#define CKMAP_BLK       4096
++#define CKMAP_MAXBYTES  ((U64)1 << 30)
++#define CKMAP_WORDS     ((int)(CKMAP_MAXBYTES / CKMAP_BLK / 32))
+ 
+ #define CCKD_MIN_FREESIZE( free_count )     (CCKD_FREE_MIN_SIZE +   \
+       free_count < CCKD_IFB_ENTS_INCR ? 0 :                         \
+diff --git a/cckddasd.c b/cckddasd.c
+index 4ce7bc24..19212aa9 100644
+--- a/cckddasd.c
++++ b/cckddasd.c
+@@ -456,6 +456,11 @@ int             rc, i;                  /* Return code, Loop index   */
+     destroy_condition( &cckd->cckdiocond );
+ 
+     /* free the cckd extension itself */
++    for (i = 0; i <= CCKD_MAX_SF; i++)
++    {
++        free( cckd->ckmap[i] );
++        cckd->ckmap[i] = NULL;
++    }
+     dev->cckd_ext = cckd_free (dev, "ext", cckd);
+ 
+     if (dev->dasdsfn) free (dev->dasdsfn);
+@@ -631,6 +636,10 @@ char            pathname[MAX_PATH];     /* file path in host format  */
+     cckd->fd[sfx] = HOPEN (pathname, flags, mode);
+     if (sfx == 0) dev->fd = cckd->fd[sfx];
+ 
++    /* a file opened again after writes: not tracked                */
++    if (cckd->fd[sfx] >= 0 && sfx <= CCKD_MAX_SF && cckd->ckmap[sfx])
++        cckd->ckover[sfx] = 1;
++
+     if (cckd->fd[sfx] >= 0)
+         cckd->open[sfx] = flags & O_RDWR ? CCKD_OPEN_RW :
+                           cckd->open[sfx] == CCKD_OPEN_RW ?
+@@ -735,6 +744,7 @@ int             rc;                     /* Return code               */
+ /*-------------------------------------------------------------------*/
+ /* Write to a cckd file                                              */
+ /*-------------------------------------------------------------------*/
++static void cckd_ckmark( CCKD_EXT* cckd, int sfx, U64 off, U64 len );
+ int cckd_write( DEVBLK* dev, int sfx, off_t off, void* buf, unsigned int len )
+ {
+ CCKD_EXT       *cckd;                   /* -> cckd extension         */
+@@ -745,6 +755,9 @@ int             rc = 0;                 /* Return code               */
+     CCKD_TRACE( "file[%d] fd[%d] write, off 0x%16.16"PRIx64" len %d",
+                 sfx, cckd->fd[ sfx ], off, len );
+ 
++    /* these blocks changed since the last checkpoint                */
++    cckd_ckmark( cckd, sfx, (U64) off, (U64) len );
++
+     /* Seek to specified offset */
+     if (lseek( cckd->fd[ sfx ], off, SEEK_SET ) < 0)
+     {
+@@ -791,6 +804,16 @@ CCKD_EXT       *cckd;                   /* -> cckd extension         */
+     CCKD_TRACE( "file[%d] fd[%d] ftruncate, off 0x%16.16"PRIx64,
+                 sfx, cckd->fd[sfx], off);
+ 
++    /* the cut part counts as written (a file that                */
++    /* grows again must not show the base copy's old bytes there) */
++    {
++        struct stat st;
++        if (fstat( cckd->fd[sfx], &st ) == 0 && (U64) st.st_size > (U64) off)
++            cckd_ckmark( cckd, sfx, (U64) off, (U64) st.st_size - (U64) off );
++        else if (cckd->fd[sfx] >= 0 && fstat( cckd->fd[sfx], &st ) != 0)
++            cckd->ckover[sfx] = 1;
++    }
++
+     /* Truncate the file */
+     if (ftruncate (cckd->fd[sfx], off) < 0)
+     {
+@@ -2041,6 +2064,150 @@ DEVBLK         *dev = data;             /* -> device block           */
+ /* Returns the number of files copied (0 = read-only device, no      */
+ /* shadow), or -1 with a reason in 'err'.                            */
+ /*-------------------------------------------------------------------*/
++/*-------------------------------------------------------------------*/
++/* Incremental                                                       */
++/* checkpoints. Every write to a CCKD file (cckd_write, and the cut  */
++/* part of an ftruncate) marks its 4 KB blocks in a per-file bitmap  */
++/* (allocated at the first write: every write since Hercules opened  */
++/* the file is in it). A full checkpoint copies the file and clears  */
++/* the bitmap (both under the I/O and file locks); a delta           */
++/* checkpoint writes only the marked blocks (cumulative since that   */
++/* full copy = the "base") into one delta file. Base copy + delta =  */
++/* the file at the delta checkpoint, byte for byte. Files larger     */
++/* than CKMAP_MAXBYTES, a re-opened file or a failed allocation set  */
++/* ckover: the next checkpoint must be full.                         */
++/*-------------------------------------------------------------------*/
++static void cckd_ckmark( CCKD_EXT* cckd, int sfx, U64 off, U64 len )
++{
++    U32* map;
++    U64  b, e;
++
++    if (sfx < 0 || sfx > CCKD_MAX_SF || len == 0)
++        return;
++    if (!(map = cckd->ckmap[ sfx ]))
++    {
++        U32* p = calloc( CKMAP_WORDS, sizeof( U32 ));
++        if (!p)
++        {
++            cckd->ckover[ sfx ] = 1;
++            return;
++        }
++        if (!__sync_bool_compare_and_swap( &cckd->ckmap[ sfx ], NULL, p ))
++            free( p );
++        map = cckd->ckmap[ sfx ];
++    }
++    if (off + len > CKMAP_MAXBYTES)
++    {
++        cckd->ckover[ sfx ] = 1;
++        if (off >= CKMAP_MAXBYTES)
++            return;
++        len = CKMAP_MAXBYTES - off;
++    }
++    b = off / CKMAP_BLK;
++    e = (off + len - 1) / CKMAP_BLK;
++    for (; b <= e; b++)
++        __sync_fetch_and_or( &map[ b >> 5 ], (U32)1 << (b & 31) );
++}
++
++/* Writer of the delta file: running crc32 and byte count (CKDLT in  */
++/* cckddasd.h; sr.c writes the header and the end record)            */
++DLL_EXPORT int ckdlt_put( CKDLT* w, const void* buf, size_t len )
++{
++    const BYTE* p = buf;
++    size_t      left = len;
++    while (left)
++    {
++        ssize_t n = write( w->fd, p, left );
++        if (n <= 0)
++            return -1;
++        p += n; left -= (size_t) n;
++    }
++    w->crc = crc32( w->crc, buf, (uInt) len );
++    w->bytes += len;
++    return 0;
++}
++DLL_EXPORT void ckdlt_le( BYTE* p, U64 v, int n )
++{
++    int i;
++    for (i = 0; i < n; i++) { p[i] = (BYTE)(v & 0xff); v >>= 8; }
++}
++
++/* Dirty bytes of a device's shadow files since the last full copy;  */
++/* -1 = not tracked completely (the next checkpoint must be full).   */
++DLL_EXPORT S64 cckd_ckpt_dirty( DEVBLK* dev )
++{
++    CCKD_EXT* cckd = dev->cckd_ext;
++    S64       n = 0;
++    int       i, w;
++    if (!cckd || dev->cckd64)
++        return -1;
++    for (i = 1; i <= cckd->sfn; i++)
++    {
++        U32* map = cckd->ckmap[ i ];
++        if (cckd->ckover[ i ] || !cckd->ckbase[ i ])
++            return -1;
++        if (!map)
++            continue;
++        for (w = 0; w < CKMAP_WORDS; w++)
++            if (map[ w ])
++                n += (S64) __builtin_popcount( map[ w ] ) * CKMAP_BLK;
++    }
++    return n;
++}
++
++/* After 'resume ... track=1': the live shadow files are the base's  */
++/* copies (+ the delta of the resumed slot, marked by the caller     */
++/* through cckd_ckpt_markrange). Writes since the open are in the    */
++/* bitmaps already; from now on deltas against that base are valid.  */
++DLL_EXPORT void cckd_ckpt_adopt( DEVBLK* dev )
++{
++    CCKD_EXT* cckd = dev->cckd_ext;
++    int       i;
++    if (!cckd)
++        return;
++    for (i = 1; i <= cckd->sfn; i++)
++        cckd->ckbase[ i ] = 1;
++}
++/* bytes of the device's shadow files now                            */
++DLL_EXPORT U64 cckd_ckpt_size( DEVBLK* dev )
++{
++    CCKD_EXT*   cckd = dev->cckd_ext;
++    struct stat st;
++    U64         n = 0;
++    int         i;
++    if (!cckd)
++        return 0;
++    for (i = 1; i <= cckd->sfn; i++)
++        if (cckd->fd[i] >= 0 && fstat( cckd->fd[i], &st ) == 0)
++            n += (U64) st.st_size;
++    return n;
++}
++/* index (1..sfn) of the shadow file with this base name, or 0       */
++DLL_EXPORT int cckd_ckpt_findname( DEVBLK* dev, const char* name )
++{
++    CCKD_EXT* cckd = dev->cckd_ext;
++    int       i;
++    if (!cckd)
++        return 0;
++    for (i = 1; i <= cckd->sfn; i++)
++    {
++        const char* sf = cckd_sf_name( dev, i );
++        const char* b;
++        if (!sf)
++            continue;
++        b = strrchr( sf, '/' );
++        b = b ? b + 1 : sf;
++        if (!strcmp( b, name ))
++            return i;
++    }
++    return 0;
++}
++DLL_EXPORT void cckd_ckpt_markrange( DEVBLK* dev, int sfx, U64 off, U64 len )
++{
++    if (dev->cckd_ext)
++        cckd_ckmark( dev->cckd_ext, sfx, off, len );
++}
++
+ static int cckd_ckpt_copy_file( int sfd, const char* dst, int dosync,
+                                 U64* size, U32* crc, char* err, size_t errlen )
+ {
+@@ -2103,9 +2270,94 @@ static int cckd_ckpt_copy_file( int sfd, const char* dst, int dosync,
+     return 0;
+ }
+ 
++/* Delta of one shadow file: record 'F' (name, size, number of runs), */
++/* then each run (offset, length, data). All numbers little endian.  */
++static int cckd_ckpt_delta_file( CCKD_EXT* cckd, int sfx, const char* name,
++                                 CKDLT* w, U64* size, U64* dbytes,
++                                 char* err, size_t errlen )
++{
++    struct stat st;
++    U32*   map = cckd->ckmap[ sfx ];
++    U64    nblk, b, total;
++    U32    nruns = 0;
++    BYTE   hdr[ 16 ];
++    BYTE*  buf;
++    size_t nl = strlen( name );
++    int    pass;
++
++    if (fstat( cckd->fd[ sfx ], &st ) < 0)
++    {
++        snprintf( err, errlen, "fstat: %s", strerror( errno ));
++        return -1;
++    }
++    total = (U64) st.st_size;
++    if (total > CKMAP_MAXBYTES)
++    {
++        snprintf( err, errlen, "%s: larger than the tracked size", name );
++        return -1;
++    }
++    nblk = (total + CKMAP_BLK - 1) / CKMAP_BLK;
++#define CKBIT( _b ) (map && (map[ (_b) >> 5 ] & ((U32)1 << ((_b) & 31))))
++    for (b = 0; b < nblk; b++)
++        if (CKBIT( b ) && (b == 0 || !CKBIT( b - 1 )))
++            nruns++;
++    if (!(buf = malloc( 256 * 1024 )))
++    {
++        snprintf( err, errlen, "malloc: %s", strerror( errno ));
++        return -1;
++    }
++    hdr[0] = 'F'; ckdlt_le( hdr + 1, nl, 2 );
++    if (ckdlt_put( w, hdr, 3 ) < 0 || ckdlt_put( w, name, nl ) < 0)
++        goto dlt_werr;
++    ckdlt_le( hdr, total, 8 ); ckdlt_le( hdr + 8, nruns, 4 );
++    if (ckdlt_put( w, hdr, 12 ) < 0)
++        goto dlt_werr;
++    *dbytes = 0;
++    for (b = 0, pass = 0; b < nblk; )
++    {
++        U64 s, e, off, len;
++        if (!CKBIT( b )) { b++; continue; }
++        s = b;
++        while (b < nblk && CKBIT( b )) b++;
++        e = b;
++        off = s * CKMAP_BLK;
++        len = MIN( e * CKMAP_BLK, total ) - off;
++        ckdlt_le( hdr, off, 8 ); ckdlt_le( hdr + 8, len, 4 );
++        if (ckdlt_put( w, hdr, 12 ) < 0)
++            goto dlt_werr;
++        while (len)
++        {
++            size_t  want = (size_t) MIN( (U64)(256 * 1024), len );
++            ssize_t n = pread( cckd->fd[ sfx ], buf, want, (off_t) off );
++            if (n <= 0)
++            {
++                snprintf( err, errlen, "%s: read: %s", name, n < 0 ? strerror( errno ) : "short file" );
++                free( buf );
++                return -1;
++            }
++            if (ckdlt_put( w, buf, (size_t) n ) < 0)
++                goto dlt_werr;
++            off += (U64) n; len -= (U64) n; *dbytes += (U64) n;
++        }
++        pass++;
++    }
++#undef CKBIT
++    free( buf );
++    *size = total;
++    return (int) pass;
++dlt_werr:
++    snprintf( err, errlen, "write delta: %s", strerror( errno ));
++    free( buf );
++    return -1;
++}
++
++/* mode: CKPT_FULL  = copy every shadow file into 'dir' (+ clear the */
++/*                    bitmaps: this copy is the new base),           */
++/*       CKPT_DELTA = append the marked blocks to the delta file 'w' */
++/*       CKPT_COPY  = copy only (verify copies; bitmaps unchanged)   */
+ DLL_EXPORT int cckd_ckpt_dev( DEVBLK* dev, const char* dir, int dosync,
+                               int waitms, CCKD_CKPT_FILE* out, int maxout,
+-                              char* err, size_t errlen )
++                              char* err, size_t errlen, int mode, void* dlt )
+ {
+ CCKD_EXT       *cckd = dev->cckd_ext;
+ struct timeval  now;
+@@ -2194,14 +2446,35 @@ int             i, n = 0, rc = 0;
+                 base = base ? base + 1 : sfname;
+                 out[n].devnum = dev->devnum;
+                 out[n].sfx    = i;
++                out[n].runs   = 0;
++                out[n].dbytes = 0;
+                 STRLCPY( out[n].name, base );
+                 STRLCPY( out[n].src,  sfname );
+-                snprintf( dst, sizeof( dst ), "%s/%s", dir, out[n].name );
+-                if (cckd_ckpt_copy_file( cckd->fd[i], dst, dosync,
+-                                         &out[n].size, &out[n].crc, err, errlen ) < 0)
++                if (mode == CKPT_DELTA)
+                 {
+-                    rc = -1;
+-                    break;
++                    int k = cckd_ckpt_delta_file( cckd, i, out[n].name, (CKDLT*) dlt,
++                                                  &out[n].size, &out[n].dbytes, err, errlen );
++                    if (k < 0) { rc = -1; break; }
++                    out[n].runs = k;
++                    out[n].crc  = 0;
++                }
++                else
++                {
++                    snprintf( dst, sizeof( dst ), "%s/%s", dir, out[n].name );
++                    if (cckd_ckpt_copy_file( cckd->fd[i], dst, dosync,
++                                             &out[n].size, &out[n].crc, err, errlen ) < 0)
++                    {
++                        rc = -1;
++                        break;
++                    }
++                    if (mode == CKPT_FULL)
++                    {
++                        /* this copy is the new base of the deltas */
++                        if (cckd->ckmap[i])
++                            memset( cckd->ckmap[i], 0, CKMAP_WORDS * sizeof( U32 ));
++                        cckd->ckover[i] = out[n].size > CKMAP_MAXBYTES;
++                        cckd->ckbase[i] = 1;
++                    }
+                 }
+                 n++;
+             }
+diff --git a/cckddasd.h b/cckddasd.h
+index 123788a1..f0e7e9f4 100644
+--- a/cckddasd.h
++++ b/cckddasd.h
+@@ -243,10 +243,24 @@ typedef struct CCKD_CKPT_FILE {
+     char    src[ 1024 ];                /* live file name            */
+     U64     size;                       /* bytes copied              */
+     U32     crc;                        /* zlib crc32 of the copy    */
++    int     runs;                       /* 0018: delta runs          */
++    U64     dbytes;                     /* 0018: delta data bytes    */
+ } CCKD_CKPT_FILE;
++/* incremental checkpoints (delta file writer, modes)                */
++typedef struct CKDLT { int fd; U32 crc; U64 bytes; } CKDLT;
++#define CKPT_FULL   1
++#define CKPT_DELTA  2
++#define CKPT_COPY   3
+ CCKD_DLL_IMPORT   int     cckd_ckpt_dev( DEVBLK* dev, const char* dir, int dosync,
+                                          int waitms, CCKD_CKPT_FILE* out, int maxout,
+-                                         char* err, size_t errlen );
++                                         char* err, size_t errlen, int mode, void* dlt );
++CCKD_DLL_IMPORT   int     ckdlt_put( CKDLT* w, const void* buf, size_t len );
++CCKD_DLL_IMPORT   void    ckdlt_le( BYTE* p, U64 v, int n );
++CCKD_DLL_IMPORT   S64     cckd_ckpt_dirty( DEVBLK* dev );
++CCKD_DLL_IMPORT   void    cckd_ckpt_adopt( DEVBLK* dev );
++CCKD_DLL_IMPORT   U64     cckd_ckpt_size( DEVBLK* dev );
++CCKD_DLL_IMPORT   int     cckd_ckpt_findname( DEVBLK* dev, const char* name );
++CCKD_DLL_IMPORT   void    cckd_ckpt_markrange( DEVBLK* dev, int sfx, U64 off, U64 len );
+ CCKD_DLL_IMPORT   void   *cckd_sf_remove(void *data);
+ CCKD_DLL_IMPORT   void   *cckd_sf_comp(void *data);
+ CCKD_DLL_IMPORT   void   *cckd_sf_chk(void *data);
+diff --git a/msgenu.h b/msgenu.h
+index ea7fdb01..fffbfb4b 100644
+--- a/msgenu.h
++++ b/msgenu.h
+@@ -1380,7 +1380,7 @@ LOGM_DLL_IMPORT int  panel_command_capture( char* cmd, char** resp, bool quiet )
+ #define HHC02027 "SR: resume failed after the machine was changed; processors configured again, IPL (clear) needed"
+ #define HHC02028 "SR: file check failed: %s"
+ //efine HHC02029 (available)
+-#define HHC02030 "CKPT: %s complete: pause %d ms (stop %d, drain %d, cckd %d, srf %d), srf %"PRIu64" bytes, %d shadow files %"PRIu64" bytes"
++#define HHC02030 "CKPT: %s complete: pause %d ms (stop %d, drain %d, cckd %d, srf %d), srf %"PRIu64" bytes, %d shadow files %"PRIu64" bytes%s"
+ #define HHC02031 "CKPT: %s failed: %s; CPUs restarted"
+ #define HHC02032 "CKPT: %s"
+ #define HHC02033 "SR: %04X: 3270 screen not saved: %s"
+diff --git a/sr.c b/sr.c
+index c48c05f2..c6d6a6c9 100644
+--- a/sr.c
++++ b/sr.c
+@@ -222,6 +222,172 @@ static int sr_drain_io( int timeout_ms, DEVBLK** busy )
+     }
+ }
+ 
++/*-------------------------------------------------------------------*/
++/* Incremental                                                       */
++/* checkpoints. 'checkpoint <dir> incr=1 base=<dir0>' writes a DELTA */
++/* when <dir0> is the last full checkpoint of this process (or the   */
++/* slot that 'resume ... track=1' adopted): only the 4 KB pages of   */
++/* main storage whose hash differs from the base's, and only the     */
++/* blocks of the shadow files written since the base copy (cckd      */
++/* bitmaps, cckddasd.c), into <dir>/shadows.dlt. A delta is always   */
++/* against the base, never against another delta (restore = base +   */
++/* one delta). Without a usable base, or when the delta would be     */
++/* larger than maxdelta= percent of the base, it writes a full one.  */
++/*-------------------------------------------------------------------*/
++#define CK_PAGE 4096
++/* progress of 'checkpoint' for an embedder that must wait for it     */
++/* without a lock (the browser page in pagehide): 4 * (checkpoints     */
++/* ended, ok or failed) + phase (0 idle, 1 CPUs stopped, 2 after the  */
++/* pause, writing the manifest)                                       */
++DLL_EXPORT volatile U32 sr_ckpt_progress = 0;
++#define CK_PHASE( _p ) (sr_ckpt_progress = (sr_ckpt_progress & ~3u) | (_p))
++#define CK_ENDED()     (sr_ckpt_progress = (sr_ckpt_progress & ~3u) + 4)
++static char  ck_base[ MAX_PATH ] = "";  /* dir of the base checkpoint */
++static int   ck_valid  = 0;             /* deltas against ck_base ok  */
++static U64*  ck_hash   = NULL;          /* page hashes of the base    */
++static U64*  ck_hash2  = NULL;          /* (next full: new hashes)    */
++static BYTE* ck_chg    = NULL;          /* pages that differ          */
++static U64   ck_npages = 0;
++static U64   ck_base_shbytes = 0;       /* bytes of the base copies   */
++static int   ck_ndelta = 0;             /* deltas since the base      */
++static struct { int mode; const char* basesrf; U64 nchg; } ck_ms;  /* 0 stock, 1 full+hash, 2 delta */
++
++/* XXH64 of one 4 KB page (each round is a bijection of the word,   */
++/* so a change of a single 8-byte word always changes the hash)      */
++#define CK_P1 0x9E3779B185EBCA87ULL
++#define CK_P2 0xC2B2AE3D27D4EB4FULL
++#define CK_P3 0x165667B19E3779F9ULL
++#define CK_P4 0x85EBCA77C2B2AE63ULL
++#define CK_P5 0x27D4EB2F165667C5ULL
++#define CK_ROTL( x, r ) (((x) << (r)) | ((x) >> (64 - (r))))
++static INLINE U64 ck_round( U64 acc, U64 in ) { acc += in * CK_P2; acc = CK_ROTL( acc, 31 ); return acc * CK_P1; }
++static INLINE U64 ck_merge( U64 h, U64 v ) { h ^= ck_round( 0, v ); return h * CK_P1 + CK_P4; }
++static U64 ck_page_hash( const BYTE* p )
++{
++    U64 v1 = CK_P1 + CK_P2, v2 = CK_P2, v3 = 0, v4 = 0 - CK_P1, h, w[4];
++    int i;
++    for (i = 0; i < CK_PAGE; i += 32)
++    {
++        memcpy( w, p + i, 32 );
++        v1 = ck_round( v1, w[0] ); v2 = ck_round( v2, w[1] );
++        v3 = ck_round( v3, w[2] ); v4 = ck_round( v4, w[3] );
++    }
++    h = CK_ROTL( v1, 1 ) + CK_ROTL( v2, 7 ) + CK_ROTL( v3, 12 ) + CK_ROTL( v4, 18 );
++    h = ck_merge( h, v1 ); h = ck_merge( h, v2 ); h = ck_merge( h, v3 ); h = ck_merge( h, v4 );
++    h += CK_PAGE;
++    h ^= h >> 33; h *= CK_P2; h ^= h >> 29; h *= CK_P3; h ^= h >> 32;
++    return h;
++}
++
++/* (re)allocate the page arrays for this main storage size           */
++static int ck_alloc()
++{
++    U64 np = sysblk.mainsize / CK_PAGE;
++    if (np == ck_npages && ck_hash && ck_hash2 && ck_chg)
++        return 0;
++    free( ck_hash ); free( ck_hash2 ); free( ck_chg );
++    ck_hash  = calloc( np ? np : 1, sizeof( U64 ));
++    ck_hash2 = calloc( np ? np : 1, sizeof( U64 ));
++    ck_chg   = calloc( np ? np : 1, 1 );
++    ck_npages = np;
++    ck_valid = 0;
++    if (!ck_hash || !ck_hash2 || !ck_chg)
++    {
++        free( ck_hash ); free( ck_hash2 ); free( ck_chg );
++        ck_hash = ck_hash2 = NULL; ck_chg = NULL; ck_npages = 0;
++        return -1;
++    }
++    return 0;
++}
++
++/* dirname of a path into buf ("." if none)                          */
++static void ck_dirname( const char* path, char* buf, size_t len )
++{
++    const char* s = strrchr( path, '/' );
++    if (!s)                { snprintf( buf, len, "." ); return; }
++    if (s == path)         { snprintf( buf, len, "/" ); return; }
++    snprintf( buf, len, "%.*s", (int)(s - path), path );
++}
++
++static U64 ck_le( const BYTE* p, int n )
++{
++    U64 v = 0;
++    while (n--) v = (v << 8) | p[n];
++    return v;
++}
++
++/* Main storage in the .srf: stock (one buffer), full with the page  */
++/* hashes of exactly the bytes written (copied first), or a delta:   */
++/* SR_SYS_MSBASE (the base's .srf) + SR_SYS_MSDELTA (runs of pages:  */
++/* first page, count (4 bytes each, big endian), the pages).         */
++static int sr_write_mainstor( SR_FILE file )
++{
++    static BYTE tmp[ 64 * 1024 ];
++    U64  np = sysblk.mainsize / CK_PAGE, p, q, off, total = 0;
++    BYTE rh[ 8 ];
++
++    if (ck_ms.mode == 1)
++    {
++        SR_WRITE_HDR( file, SR_SYS_MAINSTOR, sysblk.mainsize );
++        for (off = 0; off < sysblk.mainsize; off += sizeof( tmp ))
++        {
++            U32 n = (U32) MIN( (U64) sizeof( tmp ), sysblk.mainsize - off ), k;
++            memcpy( tmp, sysblk.mainstor + off, n );
++            for (k = 0; k + CK_PAGE <= n; k += CK_PAGE)
++                ck_hash2[ (off + k) / CK_PAGE ] = ck_page_hash( tmp + k );
++            if ((U32) SR_WRITE( tmp, 1, n, file ) != n)
++            {
++                sr_write_error_();
++                return -1;
++            }
++        }
++        return 0;
++    }
++    if (ck_ms.mode == 2)
++    {
++        SR_WRITE_STRING( file, SR_SYS_MSBASE, ck_ms.basesrf );
++        for (p = 0; p < np; )
++        {
++            if (!ck_chg[p]) { p++; continue; }
++            for (q = p; q < np && ck_chg[q]; q++) ;
++            total += 8 + (q - p) * CK_PAGE;
++            p = q;
++        }
++        if (total > 0xFFFFFFF0ULL)
++        {
++            sr_write_error_();
++            return -1;
++        }
++        SR_WRITE_HDR( file, SR_SYS_MSDELTA, total );
++        for (p = 0; p < np; )
++        {
++            if (!ck_chg[p]) { p++; continue; }
++            for (q = p; q < np && ck_chg[q]; q++) ;
++            store_fw( rh, (U32) p );
++            store_fw( rh + 4, (U32)(q - p) );
++            if (SR_WRITE( rh, 1, 8, file ) != 8)
++            {
++                sr_write_error_();
++                return -1;
++            }
++            for (off = p * CK_PAGE; off < q * CK_PAGE; )
++            {
++                U32 n = (U32) MIN( (U64) SR_BUF_CHUNKSIZE, q * CK_PAGE - off );
++                if ((U32) SR_WRITE( sysblk.mainstor + off, 1, n, file ) != n)
++                {
++                    sr_write_error_();
++                    return -1;
++                }
++                off += n;
++            }
++            p = q;
++        }
++        return 0;
++    }
++    SR_WRITE_BUF( file, SR_SYS_MAINSTOR, sysblk.mainstor, sysblk.mainsize );
++    return 0;
++}
++
+ /* Write the whole machine state (the stock suspend file contents).  */
+ /* All CPUs must be stopped and the I/O drained. Returns 0 or -1.    */
+ static int sr_write_state( SR_FILE file, CPU_BITMAP started_mask )
+@@ -252,7 +418,8 @@ struct { U16 lcss, devnum; BYTE type; } q[ 256 ];
+     SR_WRITE_VALUE (file,SR_SYS_STARTED_MASK,(U64)started_mask,sizeof(U64));
+     SR_WRITE_VALUE (file,SR_SYS_MAINSIZE,sysblk.mainsize,sizeof(sysblk.mainsize));
+     TRACE("SR: Saving MAINSTOR...\n");
+-    SR_WRITE_BUF   (file,SR_SYS_MAINSTOR,sysblk.mainstor,sysblk.mainsize);
++    if (sr_write_mainstor( file ) < 0)  /* full/delta                */
++        return -1;
+     SR_WRITE_VALUE (file,SR_SYS_SKEYSIZE,(sysblk.mainsize/_STORKEY_ARRAY_UNITSIZE),sizeof(U32));
+     TRACE("SR: Saving Storage Keys...\n");
+     SR_WRITE_BUF   (file,SR_SYS_STORKEYS,sysblk.storkeys,sysblk.mainsize/_STORKEY_ARRAY_UNITSIZE);
+@@ -600,51 +767,79 @@ static int ckpt_file_crc( const char* path, U64* size, U32* crc, int dosync )
+     return 0;
+ }
+ 
++/* open <dir>/shadows.dlt and write its header                       */
++static int ckpt_dlt_open( const char* path, CKDLT* w )
++{
++    w->fd = HOPEN( path, O_WRONLY | O_CREAT | O_TRUNC | O_BINARY, S_IRUSR | S_IWUSR | S_IRGRP );
++    w->crc = crc32( 0L, Z_NULL, 0 );
++    w->bytes = 0;
++    if (w->fd < 0)
++        return -1;
++    return ckdlt_put( w, "MVSCKDL1", 8 );
++}
++
+ int checkpoint_cmd( int argc, char* argv[], char* cmdline )
+ {
+ static CCKD_CKPT_FILE files[ CKPT_MAXFILES ];
+-char        *dir = NULL;
++static CCKD_CKPT_FILE vfiles[ CKPT_MAXFILES ];
++char        *dir = NULL, *base = NULL;
+ int          level = 1, waitms = 10000, screenms = 2000, dosync = 1;
+-int          i, n, nfiles = 0, started = 0;
+-int          ms_stop = 0, ms_drain = 0, ms_cckd = 0, ms_srf = 0, ms_pause = 0;
++int          incr = 0, maxdelta = 50, maxshadow = 90, verify = 0;
++int          i, n, nfiles = 0, nvfiles = 0, started = 0, kind = 0;
++int          ms_stop = 0, ms_drain = 0, ms_hash = 0, ms_cckd = 0, ms_srf = 0, ms_pause = 0, ms_crc = 0;
+ CPU_BITMAP   mask = 0;
+ struct timeval t0, tv;
+-char         srf[ MAX_PATH ], man[ MAX_PATH ], mode[ 8 ], why[ 1024 ], bid[ 512 ];
++char         srf[ MAX_PATH ], man[ MAX_PATH ], dlt[ MAX_PATH ], vdir[ MAX_PATH ], basesrf[ MAX_PATH ];
++char         mode[ 8 ], why[ 1024 ], bid[ 512 ], kwhy[ 256 ] = "";
+ char         err[ 512 ];
+ SR_FILE      file;
+ DEVBLK      *dev, *busy = NULL;
+-U64          srfsize = 0, shbytes = 0;
++U64          srfsize = 0, shbytes = 0, dbytes = 0, p, nchg = 0;
+ U32          srfcrc = 0;
++S64          dirty = 0;
++U64          cursh = 0;
++CKDLT        w;
+ FILE        *mf;
++#define CKPT_USAGE "usage: checkpoint <dir> [level=0..9] [wait=ms] [screens=ms] [sync=0|1] [incr=0|1] [base=<dir>] [maxdelta=1..100] [maxshadow=1..100] [verify=0|1]"
+ 
+     UNREFERENCED( cmdline );
++    w.fd = -1;
+ 
+     for (i = 1; i < argc; i++)
+     {
+-        if      (!strncasecmp( argv[i], "level=",   6 )) level    = atoi( argv[i] + 6 );
+-        else if (!strncasecmp( argv[i], "wait=",    5 )) waitms   = atoi( argv[i] + 5 );
+-        else if (!strncasecmp( argv[i], "screens=", 8 )) screenms = atoi( argv[i] + 8 );
+-        else if (!strncasecmp( argv[i], "sync=",    5 )) dosync   = atoi( argv[i] + 5 ) != 0;
+-        else if (!dir && !strchr( argv[i], '=' ))        dir      = argv[i];
++        if      (!strncasecmp( argv[i], "level=",    6 )) level    = atoi( argv[i] + 6 );
++        else if (!strncasecmp( argv[i], "wait=",     5 )) waitms   = atoi( argv[i] + 5 );
++        else if (!strncasecmp( argv[i], "screens=",  8 )) screenms = atoi( argv[i] + 8 );
++        else if (!strncasecmp( argv[i], "sync=",     5 )) dosync   = atoi( argv[i] + 5 ) != 0;
++        else if (!strncasecmp( argv[i], "incr=",     5 )) incr     = atoi( argv[i] + 5 ) != 0;
++        else if (!strncasecmp( argv[i], "base=",     5 )) base     = argv[i] + 5;
++        else if (!strncasecmp( argv[i], "maxdelta=", 9 )) maxdelta = atoi( argv[i] + 9 );
++        else if (!strncasecmp( argv[i], "verify=",   7 )) verify   = atoi( argv[i] + 7 ) != 0;
++        else if (!strncasecmp( argv[i], "maxshadow=",10 )) maxshadow = atoi( argv[i] + 10 );
++        else if (!dir && !strchr( argv[i], '=' ))         dir      = argv[i];
+         else
+         {
+-            WRMSG( HHC02032, "E", "usage: checkpoint <dir> [level=0..9] [wait=ms] [screens=ms] [sync=0|1]" );
++            WRMSG( HHC02032, "E", CKPT_USAGE );
+             return -1;
+         }
+     }
+-    if (!dir || level < 0 || level > 9 || waitms < 0 || screenms < 0)
++    if (!dir || level < 0 || level > 9 || waitms < 0 || screenms < 0 || maxdelta < 1 || maxdelta > 100 || maxshadow < 1 || maxshadow > 100)
+     {
+-        WRMSG( HHC02032, "E", "usage: checkpoint <dir> [level=0..9] [wait=ms] [screens=ms] [sync=0|1]" );
++        WRMSG( HHC02032, "E", CKPT_USAGE );
+         return -1;
+     }
+-    if (strlen( dir ) > MAX_PATH - 64)
++    if (strlen( dir ) > MAX_PATH - 64 || (base && strlen( base ) > MAX_PATH - 64))
+     {
+         WRMSG( HHC02032, "E", "checkpoint: directory name too long" );
+         return -1;
+     }
++    if (base && !*base)
++        base = NULL;
+ 
+     snprintf( srf, sizeof( srf ), "%s/machine.srf", dir );
+     snprintf( man, sizeof( man ), "%s/checkpoint.json", dir );
++    snprintf( dlt, sizeof( dlt ), "%s/shadows.dlt", dir );
++    snprintf( vdir, sizeof( vdir ), "%s/verify", dir );
+ 
+     if (mkdir( dir, S_IRWXU | S_IRGRP | S_IXGRP ) < 0 && errno != EEXIST)
+     {
+@@ -659,8 +854,11 @@ FILE        *mf;
+         WRMSG( HHC02031, "E", dir, why );
+         return -1;
+     }
++    if (base && !strcmp( base, dir ))
++        base = NULL;
+ 
+     gettimeofday( &t0, NULL );
++    CK_PHASE( 1 );
+ 
+     /* 1. stop the CPUs */
+     if (sr_stop_cpus( &mask, 10000 ) < 0)
+@@ -681,7 +879,72 @@ FILE        *mf;
+     }
+     ms_drain = sr_ms_since( &t0 ) - ms_stop;
+ 
+-    /* 3. CCKD devices: flush, harden, copy the shadow files */
++    /* full or delta? (kind 0 = stock full without                   */
++    /* tracking, 1 = full: the new base, 2 = delta against ck_base)  */
++    if (incr && (sysblk.mainsize % CK_PAGE || ck_alloc() < 0))
++    {
++        snprintf( kwhy, sizeof( kwhy ), "no tracking (main storage size or memory)" );
++        incr = 0;
++    }
++    if (incr)
++    {
++        kind = 1;
++        if (!base)
++            snprintf( kwhy, sizeof( kwhy ), "no base requested" );
++        else if (!ck_valid)
++            snprintf( kwhy, sizeof( kwhy ), "no base in this process" );
++        else if (strcmp( base, ck_base ))
++            snprintf( kwhy, sizeof( kwhy ), "base %s is not the tracked base", base );
++        else
++        {
++            for (p = 0; p < ck_npages; p++)
++            {
++                ck_chg[p] = ck_page_hash( sysblk.mainstor + p * CK_PAGE ) != ck_hash[p];
++                nchg += ck_chg[p];
++            }
++            for (dev = sysblk.firstdev; dev && dirty >= 0; dev = dev->nextdev)
++            {
++                S64 d;
++                if (!dev->allocated || !dev->cckd_ext)
++                    continue;
++                d = cckd_ckpt_dirty( dev );
++                dirty = d < 0 ? -1 : dirty + d;
++                cursh += cckd_ckpt_size( dev );
++            }
++            if (dirty < 0)
++                snprintf( kwhy, sizeof( kwhy ), "shadow writes not tracked completely" );
++            else if (nchg * 100 > ck_npages * (U64) maxdelta)
++                snprintf( kwhy, sizeof( kwhy ), "storage delta %"PRIu64" of %"PRIu64" pages", nchg, ck_npages );
++            else if ((U64) dirty * 100 > MAX( cursh, (U64)(1 << 20) ) * (U64) maxshadow)
++                snprintf( kwhy, sizeof( kwhy ), "shadow delta %"PRId64" of %"PRIu64" bytes", dirty, cursh );
++            else
++                kind = 2;
++        }
++        ms_hash = sr_ms_since( &t0 ) - ms_stop - ms_drain;
++    }
++    if (kind != 2)
++        ck_valid = 0;               /* the full copy clears the bitmaps */
++    if (kind == 2)
++        snprintf( basesrf, sizeof( basesrf ), "%s/machine.srf", ck_base );
++
++    /* 3. CCKD devices: flush, harden, copy the shadow files (full)  */
++    /*    or write their changed blocks into shadows.dlt (delta)     */
++    if (kind == 2)
++    {
++        unlink( dlt );
++        if (ckpt_dlt_open( dlt, &w ) < 0)
++        {
++            snprintf( why, sizeof( why ), "open %s: %s", dlt, strerror( errno ));
++            goto ckpt_fail;
++        }
++    }
++    else
++        unlink( dlt );              /* (a full slot has no delta)   */
++    if (verify && kind == 2 && mkdir( vdir, S_IRWXU | S_IRGRP | S_IXGRP ) < 0 && errno != EEXIST)
++    {
++        snprintf( why, sizeof( why ), "mkdir %s: %s", vdir, strerror( errno ));
++        goto ckpt_fail;
++    }
+     for (dev = sysblk.firstdev; dev; dev = dev->nextdev)
+     {
+         if (!dev->allocated)
+@@ -689,15 +952,31 @@ FILE        *mf;
+         if (dev->cckd_ext)
+         {
+             n = cckd_ckpt_dev( dev, dir, dosync, waitms, files + nfiles,
+-                               CKPT_MAXFILES - nfiles, err, sizeof( err ));
++                               CKPT_MAXFILES - nfiles, err, sizeof( err ),
++                               kind == 2 ? CKPT_DELTA : CKPT_FULL, &w );
+             if (n < 0)
+             {
+                 snprintf( why, sizeof( why ), "device %04X: %s", dev->devnum, err );
+                 goto ckpt_fail;
+             }
+             for (i = nfiles; i < nfiles + n; i++)
++            {
+                 shbytes += files[i].size;
++                dbytes  += files[i].dbytes;
++            }
+             nfiles += n;
++            if (verify && kind == 2)
++            {
++                /* test option: also a full copy, to compare base + delta */
++                n = cckd_ckpt_dev( dev, vdir, 0, waitms, vfiles + nvfiles,
++                                   CKPT_MAXFILES - nvfiles, err, sizeof( err ), CKPT_COPY, NULL );
++                if (n < 0)
++                {
++                    snprintf( why, sizeof( why ), "device %04X: verify copy: %s", dev->devnum, err );
++                    goto ckpt_fail;
++                }
++                nvfiles += n;
++            }
+         }
+         else if (dev->ckdtab && dev->fd >= 0 && !dev->ckdrdonly)
+         {
+@@ -705,55 +984,118 @@ FILE        *mf;
+             goto ckpt_fail;
+         }
+     }
+-    ms_cckd = sr_ms_since( &t0 ) - ms_stop - ms_drain;
++    if (kind == 2)
++    {
++        BYTE tr[ 5 ];
++        tr[0] = 'E'; ckdlt_le( tr + 1, (U64) nfiles, 4 );
++        n = ckdlt_put( &w, tr, 5 );
++        if (close( w.fd ) < 0 || n < 0)
++        {
++            w.fd = -1;
++            snprintf( why, sizeof( why ), "writing %s: %s", dlt, strerror( errno ));
++            goto ckpt_fail;
++        }
++        w.fd = -1;
++    }
++    ms_cckd = sr_ms_since( &t0 ) - ms_stop - ms_drain - ms_hash;
+ 
+     /* 4. the machine state */
+     if (level == 0) STRLCPY( mode, "wbT" );
+     else            snprintf( mode, sizeof( mode ), "wb%d", level );
++    if (verify && kind == 2)
++    {
++        char vsrf[ MAX_PATH ];
++        snprintf( vsrf, sizeof( vsrf ), "%s/machine.srf", vdir );
++        ck_ms.mode = 0;
++        if (!(file = SR_OPEN( vsrf, mode )))
++        {
++            snprintf( why, sizeof( why ), "open %s: %s", vsrf, strerror( errno ));
++            goto ckpt_fail;
++        }
++        sysblk.sr_ckpt_screen_ms = -1;
++        n = sr_write_state( file, mask );
++        sysblk.sr_ckpt_screen_ms = 0;
++        if (SR_CLOSE( file ) != 0 || n < 0)
++        {
++            snprintf( why, sizeof( why ), "writing %s failed", vsrf );
++            goto ckpt_fail;
++        }
++    }
+     if (!(file = SR_OPEN( srf, mode )))
+     {
+         snprintf( why, sizeof( why ), "open %s: %s", srf, strerror( errno ));
+         goto ckpt_fail;
+     }
++    ck_ms.mode = kind;
++    ck_ms.basesrf = basesrf;
++    ck_ms.nchg = nchg;
+     sysblk.sr_ckpt_screen_ms = screenms > 0 ? screenms : -1;
+     n = sr_write_state( file, mask );
+     sysblk.sr_ckpt_screen_ms = 0;
++    ck_ms.mode = 0;
+     if (SR_CLOSE( file ) != 0 || n < 0)
+     {
+         snprintf( why, sizeof( why ), "writing %s failed", srf );
+         goto ckpt_fail;
+     }
++    ms_srf = sr_ms_since( &t0 ) - ms_stop - ms_drain - ms_hash - ms_cckd;
++
++    /* 5. run again (0018: the read-back crc and the fsyncs of the    */
++    /*    .srf and the delta file follow after the pause)             */
++    started = sr_start_cpus( mask );
++    ms_pause = sr_ms_since( &t0 );
++    CK_PHASE( 2 );
++
+     if (ckpt_file_crc( srf, &srfsize, &srfcrc, dosync ) < 0)
+     {
+         snprintf( why, sizeof( why ), "reading %s back: %s", srf, strerror( errno ));
+-        goto ckpt_fail;
++        if (kind == 1) ck_valid = 0;
++        WRMSG( HHC02031, "E", dir, why );
++        CK_ENDED();
++        return -1;
+     }
+-    ms_srf = sr_ms_since( &t0 ) - ms_stop - ms_drain - ms_cckd;
+-
+-    /* 5. run again */
+-    started = sr_start_cpus( mask );
+-    ms_pause = sr_ms_since( &t0 );
++    if (kind == 2 && dosync)
++    {
++        int dfd = HOPEN( dlt, O_RDWR | O_BINARY );
++        if (dfd >= 0) { fsync( dfd ); close( dfd ); }
++    }
++    ms_crc = sr_ms_since( &t0 ) - ms_pause;
+ 
+     /* 6. the manifest, last */
+     if (!(mf = fopen( man, "w" )))
+     {
+         snprintf( why, sizeof( why ), "open %s: %s", man, strerror( errno ));
+         WRMSG( HHC02031, "E", dir, why );
++        CK_ENDED();
+         return -1;
+     }
+     gettimeofday( &tv, NULL );
+-    fprintf( mf, "{\"format\":\"hercules-checkpoint\",\"version\":1,\n" );
++    fprintf( mf, "{\"format\":\"hercules-checkpoint\",\"version\":%d,\n", kind ? 2 : 1 );
+     fprintf( mf, " \"build\":\"%s\",\n", sr_build_id( bid, sizeof( bid )));
+     fprintf( mf, " \"created\":%"PRId64",\n", (S64) tv.tv_sec * 1000 + tv.tv_usec / 1000 );
++    fprintf( mf, " \"kind\":\"%s\",\"kindWhy\":\"%s\",", kind == 2 ? "delta" : "full", kwhy );
++    if (kind == 2)
++        fprintf( mf, "\"base\":\"%s\",\"deltaNo\":%d,\"msPages\":%"PRIu64",\"npages\":%"PRIu64",\n"
++                     " \"delta\":{\"file\":\"shadows.dlt\",\"size\":%"PRIu64",\"crc32\":\"%08X\",\"bytes\":%"PRIu64"},\n",
++                 ck_base, ck_ndelta + 1, nchg, ck_npages, w.bytes, w.crc, dbytes );
++    else
++        fprintf( mf, "\n" );
+     fprintf( mf, " \"srf\":{\"file\":\"machine.srf\",\"size\":%"PRIu64",\"crc32\":\"%08X\",\"level\":%d},\n",
+              srfsize, srfcrc, level );
+-    fprintf( mf, " \"cpusStarted\":%d,\"pauseMs\":%d,\"stopMs\":%d,\"drainMs\":%d,\"cckdMs\":%d,\"srfMs\":%d,\n",
+-             started, ms_pause, ms_stop, ms_drain, ms_cckd, ms_srf );
++    fprintf( mf, " \"cpusStarted\":%d,\"pauseMs\":%d,\"stopMs\":%d,\"drainMs\":%d,\"hashMs\":%d,\"cckdMs\":%d,\"srfMs\":%d,\"crcMs\":%d,\n",
++             started, ms_pause, ms_stop, ms_drain, ms_hash, ms_cckd, ms_srf, ms_crc );
+     fprintf( mf, " \"shadows\":[" );
+     for (i = 0; i < nfiles; i++)
+-        fprintf( mf, "%s\n  {\"dev\":\"%04X\",\"sfx\":%d,\"file\":\"%s\",\"src\":\"%s\",\"size\":%"PRIu64",\"crc32\":\"%08X\"}",
+-                 i ? "," : "", files[i].devnum, files[i].sfx, files[i].name, files[i].src,
+-                 files[i].size, files[i].crc );
++    {
++        if (kind == 2)
++            fprintf( mf, "%s\n  {\"dev\":\"%04X\",\"sfx\":%d,\"file\":\"%s\",\"src\":\"%s\",\"size\":%"PRIu64",\"delta\":true,\"runs\":%d,\"bytes\":%"PRIu64"}",
++                     i ? "," : "", files[i].devnum, files[i].sfx, files[i].name, files[i].src,
++                     files[i].size, files[i].runs, files[i].dbytes );
++        else
++            fprintf( mf, "%s\n  {\"dev\":\"%04X\",\"sfx\":%d,\"file\":\"%s\",\"src\":\"%s\",\"size\":%"PRIu64",\"crc32\":\"%08X\"}",
++                     i ? "," : "", files[i].devnum, files[i].sfx, files[i].name, files[i].src,
++                     files[i].size, files[i].crc );
++    }
+     fprintf( mf, "],\n \"end\":true}\n" );
+     fflush( mf );
+     if (dosync)
+@@ -762,7 +1104,9 @@ FILE        *mf;
+     {
+         snprintf( why, sizeof( why ), "writing %s failed", man );
+         unlink( man );
++        if (kind == 1) ck_valid = 0;
+         WRMSG( HHC02031, "E", dir, why );
++        CK_ENDED();
+         return -1;
+     }
+     if (dosync)
+@@ -771,16 +1115,46 @@ FILE        *mf;
+         if (dfd >= 0) { fsync( dfd ); close( dfd ); }
+     }
+ 
+-    // "CKPT: %s complete: pause %d ms (stop %d, drain %d, cckd %d, srf %d), srf %"PRIu64" bytes, %d shadow files %"PRIu64" bytes"
++    /* a full checkpoint is the new base                */
++    if (kind == 1)
++    {
++        U64* t = ck_hash; ck_hash = ck_hash2; ck_hash2 = t;
++        snprintf( ck_base, sizeof( ck_base ), "%s", dir );
++        ck_base_shbytes = shbytes;
++        ck_ndelta = 0;
++        ck_valid = 1;
++    }
++    else if (kind == 2)
++        ck_ndelta++;
++
++    // "CKPT: %s complete: pause %d ms (stop %d, drain %d, cckd %d, srf %d), srf %"PRIu64" bytes, %d shadow files %"PRIu64" bytes%s"
++    if (kind == 2)
++        snprintf( kwhy, sizeof( kwhy ), "; delta %d of %s: %"PRIu64" pages, shadow delta %"PRIu64" bytes, hash %d ms, crc %d ms",
++                  ck_ndelta, ck_base, nchg, w.bytes, ms_hash, ms_crc );
++    else if (incr)
++    {
++        char k2[ 256 ];
++        snprintf( k2, sizeof( k2 ), "; full (%s), hash %d ms, crc %d ms", kwhy, ms_hash, ms_crc );
++        snprintf( kwhy, sizeof( kwhy ), "%s", k2 );
++    }
++    else
++        snprintf( kwhy, sizeof( kwhy ), "; crc %d ms", ms_crc );
+     WRMSG( HHC02030, "I", dir, ms_pause, ms_stop, ms_drain, ms_cckd, ms_srf,
+-           srfsize, nfiles, shbytes );
++           srfsize, nfiles, shbytes, kwhy );
++    CK_ENDED();
+     return 0;
+ 
+ ckpt_fail:
+     sysblk.sr_ckpt_screen_ms = 0;
++    ck_ms.mode = 0;
++    if (w.fd >= 0)
++        close( w.fd );
++    if (kind != 2)
++        ck_valid = 0;
+     sr_start_cpus( mask );
+     // "CKPT: %s failed: %s; CPUs restarted"
+     WRMSG( HHC02031, "E", dir, why );
++    CK_ENDED();
+     return -1;
+ }
+ 
+@@ -792,11 +1166,12 @@ ckpt_fail:
+ /* Returns 0, -1 (damaged; reason in why) or -2 (build mismatch,     */
+ /* message already issued).                                          */
+ /*-------------------------------------------------------------------*/
+-static int sr_check_file( SR_FILE file, char* why, size_t whylen )
++static int sr_check_file( SR_FILE file, char* why, size_t whylen, int depth, U64* msbytes )
+ {
+ U32      key = 0, len = 0;
+ U64      mainsize = 0;
+ int      cpu = 0;
++U64      mslen = 0;
+ char     buf[ SR_MAX_STRING_LENGTH + 1 ];
+ char     bid[ 512 ];
+ 
+@@ -833,7 +1208,11 @@ char     bid[ 512 ];
+     {
+         SR_READ_HDR( file, key, len );
+         if (key == SR_EOF)
++        {
++            if (msbytes)
++                *msbytes = mslen;
+             return 0;
++        }
+         if ((key & SR_KEY_ID_MASK) != SR_KEY_ID)
+         {
+             snprintf( why, whylen, "invalid key %8.8X", key );
+@@ -849,6 +1228,68 @@ char     bid[ 512 ];
+                 return -1;
+             }
+         }
++        else if (key == SR_SYS_MAINSTOR)
++        {
++            mslen = len;
++            SR_READ_SKIP( file, len );
++        }
++        else if (key == SR_SYS_MSBASE)
++        {
++            /* a delta: its base must be a complete,                 */
++            /* full file of this build with the same storage size    */
++            SR_FILE bf;
++            U64     bms = 0;
++            int     brc;
++            char    bwhy[ 256 ];
++            if (depth > 0 || len > SR_MAX_STRING_LENGTH)
++            {
++                snprintf( why, whylen, "a delta file as the base of a delta" );
++                return -1;
++            }
++            SR_READ_STRING( file, buf, len );
++            if (!(bf = SR_OPEN( buf, "rb" )))
++            {
++                snprintf( why, whylen, "base %s: %s", buf, strerror( errno ));
++                return -1;
++            }
++            brc = sr_check_file( bf, bwhy, sizeof( bwhy ), 1, &bms );
++            SR_CLOSE( bf );
++            if (brc == -2)
++                return -2;
++            if (brc < 0)
++            {
++                snprintf( why, whylen, "base %s: %s", buf, bwhy );
++                return -1;
++            }
++            if (!mainsize || bms != mainsize)
++            {
++                snprintf( why, whylen, "base %s: main storage %"PRIu64" bytes, delta %"PRIu64, buf, bms, mainsize );
++                return -1;
++            }
++            mslen = bms;
++        }
++        else if (key == SR_SYS_MSDELTA)
++        {
++            U32  left = len, first, cnt;
++            BYTE rh[ 8 ];
++            while (left)
++            {
++                if (left < 8 || SR_READ( rh, 1, 8, file ) != 8)
++                {
++                    snprintf( why, whylen, "storage delta: bad run" );
++                    return -1;
++                }
++                left -= 8;
++                first = fetch_fw( rh ); cnt = fetch_fw( rh + 4 );
++                if (!cnt || ((U64) first + cnt) * CK_PAGE > mainsize || (U64) cnt * CK_PAGE > left)
++                {
++                    snprintf( why, whylen, "storage delta: run %u+%u out of range", first, cnt );
++                    return -1;
++                }
++                SR_READ_SKIP( file, cnt * CK_PAGE );
++                left -= cnt * CK_PAGE;
++            }
++        }
+         else if (key == SR_CPU)
+         {
+             SR_READ_VALUE( file, len, &cpu, sizeof( cpu ));
+@@ -863,6 +1304,74 @@ char     bid[ 512 ];
+     }
+ }
+ 
++/* after 'resume <dir>/machine.srf track=1': make the                 */
++/* base of that checkpoint the tracked base (ck_hash holds the page   */
++/* hashes of the base's main storage, computed while it was read).    */
++/* For a delta, mark the blocks of <dir>/shadows.dlt as written.       */
++static void sr_track_adopt( const char* fn, const char* rbase, int isdelta )
++{
++    DEVBLK* dev;
++    U64     sh = 0;
++    char    d[ MAX_PATH ], dlt[ MAX_PATH ];
++    int     ok = 1;
++
++    for (dev = sysblk.firstdev; dev; dev = dev->nextdev)
++        if (dev->allocated && dev->cckd_ext)
++        {
++            cckd_ckpt_adopt( dev );
++            sh += cckd_ckpt_size( dev );
++        }
++    if (isdelta)
++    {
++        BYTE  h[ 16 ];
++        char  name[ 256 ];
++        FILE* f;
++        ck_dirname( fn, d, sizeof( d ));
++        snprintf( dlt, sizeof( dlt ), "%s/shadows.dlt", d );
++        ok = 0;
++        if ((f = fopen( dlt, "rb" )))
++        {
++            ok = fread( h, 1, 8, f ) == 8 && !memcmp( h, "MVSCKDL1", 8 );
++            while (ok)
++            {
++                U32 nl, nruns, r;
++                U64 size;
++                if (fread( h, 1, 1, f ) != 1) { ok = 0; break; }
++                if (h[0] == 'E') break;
++                if (h[0] != 'F' || fread( h, 1, 2, f ) != 2) { ok = 0; break; }
++                nl = h[0] | (h[1] << 8);
++                if (nl >= sizeof( name ) || fread( name, 1, nl, f ) != nl || fread( h, 1, 12, f ) != 12) { ok = 0; break; }
++                name[ nl ] = 0;
++                size = ck_le( h, 8 ); nruns = (U32) ck_le( h + 8, 4 );
++                UNREFERENCED( size );
++                for (dev = sysblk.firstdev; dev; dev = dev->nextdev)
++                    if (dev->allocated && dev->cckd_ext && cckd_ckpt_findname( dev, name ) > 0)
++                        break;
++                if (!dev) { ok = 0; break; }
++                for (r = 0; r < nruns && ok; r++)
++                {
++                    U64 off; U32 rl;
++                    if (fread( h, 1, 12, f ) != 12) { ok = 0; break; }
++                    off = ck_le( h, 8 ); rl = (U32) ck_le( h + 8, 4 );
++                    cckd_ckpt_markrange( dev, cckd_ckpt_findname( dev, name ), off, rl );
++                    if (fseek( f, rl, SEEK_CUR ) != 0) ok = 0;
++                }
++            }
++            fclose( f );
++        }
++    }
++    if (!ok)
++    {
++        // (a delta whose blocks cannot be marked: no deltas until the next full)
++        WRMSG( HHC02032, "W", "resume: track=1 ignored: shadows.dlt of the resumed checkpoint not readable" );
++        return;
++    }
++    snprintf( ck_base, sizeof( ck_base ), "%s", rbase );
++    ck_base_shbytes = sh;
++    ck_ndelta = 0;
++    ck_valid = 1;
++}
++
+ #define SR_NULL_REGS_CHECK(_regs)  if ((_regs) == NULL) goto sr_null_regs_exit;
+ 
+ int resume_cmd(int argc, char *argv[],char *cmdline)
+@@ -890,9 +1399,21 @@ char     buf[SR_MAX_STRING_LENGTH+1];
+ char     zeros[16];
+ S64      dreg;
+ int      numconfdev=0;
++int      track = 0;                     /* adopt base                */
++int      isdelta = 0;
++char     rbase[ MAX_PATH ] = "";
+ 
+     UNREFERENCED(cmdline);
+ 
++    /* resume <file> [track=1]. track=1: the caller                   */
++    /* restored the shadow files from this checkpoint (its base copies */
++    /* + its delta): later 'checkpoint ... incr=1 base=<its base dir>' */
++    /* may write deltas against that base                             */
++    if (argc == 3 && !strncasecmp( argv[2], "track=", 6 ))
++    {
++        track = atoi( argv[2] + 6 ) != 0;
++        argc = 2;
++    }
+     if (argc > 2)
+     {
+         // "SR: too many arguments"
+@@ -902,6 +1423,9 @@ int      numconfdev=0;
+ 
+     if (argc == 2)
+         fn = argv[1];
++    if (track && (sysblk.mainsize % CK_PAGE || ck_alloc() < 0))
++        track = 0;
++    ck_valid = 0;                       /* (the old base is gone)     */
+ 
+     memset (zeros, 0, sizeof(zeros));
+ 
+@@ -926,7 +1450,7 @@ int      numconfdev=0;
+ 
+     /* check the whole file first; on any problem the                 */
+     /* machine is not changed (the caller can IPL instead)            */
+-    rc = sr_check_file( file, why, sizeof( why ));
++    rc = sr_check_file( file, why, sizeof( why ), 0, NULL );
+     SR_CLOSE( file );
+     if (rc < 0)
+     {
+@@ -1049,8 +1573,65 @@ int      numconfdev=0;
+         case SR_SYS_MAINSTOR:
+             TRACE("SR: Restoring MAINSTOR...\n");
+             SR_READ_BUF(file, sysblk.mainstor, mainsize);
++            if (track)                  /* base hashes                */
++            {
++                U64 p;
++                for (p = 0; p < ck_npages; p++)
++                    ck_hash[p] = ck_page_hash( sysblk.mainstor + p * CK_PAGE );
++                ck_dirname( fn, rbase, sizeof( rbase ));
++            }
+             break;
+ 
++        case SR_SYS_MSBASE:             /* a delta                    */
++        {
++            SR_FILE bf;
++            U32     bkey = 0, blen = 0;
++            SR_READ_STRING(file, buf, len);
++            isdelta = 1;
++            if (!(bf = SR_OPEN( buf, "rb" )))
++            {
++                WRMSG(HHC02001, "E", "open() base", strerror(errno));
++                goto sr_error_exit;
++            }
++            while (bkey != SR_SYS_MAINSTOR)
++            {
++                if (sr_read_hdr( (FILE*) bf, &bkey, &blen ) != 0 || bkey == SR_EOF)
++                    { SR_CLOSE( bf ); goto sr_error_exit; }
++                if (bkey != SR_SYS_MAINSTOR && sr_read_skip( (FILE*) bf, blen ) != 0)
++                    { SR_CLOSE( bf ); goto sr_error_exit; }
++            }
++            if (blen != mainsize || sr_read_buf( (FILE*) bf, sysblk.mainstor, mainsize ) != 0)
++                { SR_CLOSE( bf ); goto sr_error_exit; }
++            SR_CLOSE( bf );
++            if (track)
++            {
++                U64 p;
++                for (p = 0; p < ck_npages; p++)
++                    ck_hash[p] = ck_page_hash( sysblk.mainstor + p * CK_PAGE );
++                ck_dirname( buf, rbase, sizeof( rbase ));
++            }
++            break;
++        }
++
++        case SR_SYS_MSDELTA:            /* its pages                  */
++        {
++            U32  left = len, first, cnt;
++            BYTE rh[ 8 ];
++            while (left)
++            {
++                if (left < 8 || SR_READ( rh, 1, 8, file ) != 8)
++                    goto sr_error_exit;
++                left -= 8;
++                first = fetch_fw( rh ); cnt = fetch_fw( rh + 4 );
++                if (!cnt || ((U64) first + cnt) * CK_PAGE > mainsize || (U64) cnt * CK_PAGE > left)
++                    goto sr_error_exit;
++                if (sr_read_buf( (FILE*) file, sysblk.mainstor + (U64) first * CK_PAGE, (U64) cnt * CK_PAGE ) != 0)
++                    goto sr_error_exit;
++                left -= cnt * CK_PAGE;
++            }
++            break;
++        }
++
+         case SR_SYS_SKEYSIZE:
+             SR_READ_VALUE(file, len, &len, sizeof(len));
+             if (len > (U32)(sysblk.mainsize/_STORKEY_ARRAY_UNITSIZE))
+@@ -1926,6 +2507,12 @@ int      numconfdev=0;
+ #endif
+     machine_check_crwpend();
+ 
++    /* track=1: this checkpoint's base is the base of                */
++    /* the next deltas; the blocks of the resumed delta count as      */
++    /* written since the base (they are in the live files now)        */
++    if (track && rbase[0])
++        sr_track_adopt( fn, rbase, isdelta );
++
+     /* Start the CPUs */
+     TRACE("SR: Resuming CPUs...\n");
+     OBTAIN_INTLOCK(NULL);
+diff --git a/sr.h b/sr.h
+index 25d05a1d..288b4b4f 100644
+--- a/sr.h
++++ b/sr.h
+@@ -197,6 +197,8 @@
+ #define SR_SYS_LPARNUM          0xace10052
+ #define SR_SYS_CPUIDFMT         0xace10053
+ #define SR_SYS_OPERATION_MODE   0xace10054
++#define SR_SYS_MSBASE           0xace10060  /* delta: base .srf                */
++#define SR_SYS_MSDELTA          0xace10061  /* changed pages                   */
+ 
+ #define SR_SYS_SERVC            0xace11000
+ 
