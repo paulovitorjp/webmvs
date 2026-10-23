@@ -94,3 +94,11 @@ dialog a { color: var(--accent); }
 .attrib { flex: none; margin: 0; padding: 3px 10px; color: var(--dim); font-size: 12px; text-align: center; }
 .attrib a { color: inherit; }
 .loader-box .attrib { padding: 18px 0 0; }
+/* /embed (the X player card): terminal only. bundle-hash.py adds class "embed" to <html> in embed.html. */
+#open-full, #loader-open { display: none; }
+.embed #open-full { display: inline-block; text-decoration: none; color: var(--fg); white-space: nowrap; }
+.embed #loader-open { display: block; }
+.embed .tools > :not(#open-full):not(#keys-btn), .embed #dasd-status, .embed #save-status, .embed #hint, .embed #add-tso { display: none !important; }
+.embed header { gap: 8px; padding: 2px 6px; flex-wrap: nowrap; }
+.embed #ipl-status { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.embed .attrib { font-size: 11px; padding: 2px 6px; }

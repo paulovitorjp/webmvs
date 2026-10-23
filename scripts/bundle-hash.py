@@ -162,6 +162,16 @@ rewrite('index.html', [('href="./app.css"', f'href="./{names["assets/app.css"]}"
                        ('src="./app.js"', f'src="./{names["assets/app.js"]}"', 1),
                        ('var L = [/*PRELOAD*/];', 'var L = ' + json.dumps([[('./' + u), k, q] for u, k, q in pl], separators=(',', ':')) + ';', 1)])
 
+# 6b. embed.html (served as /embed: the X player card frame). The same page with class "embed" (terminal only)
+# and without coi-serviceworker: a service worker cannot isolate a page in a cross-origin frame. Its
+# isolation comes from the Document-Isolation-Policy header (_headers below; Chromium 137+ on desktop).
+idx = rd('index.html').decode()
+coi = re.search(r'<!-- First script:.*?<script src="\./coi-serviceworker\.js"></script>\n', idx, re.S)
+if not coi: sys.exit('bundle-hash: index.html: coi-serviceworker block not found')
+emb = idx.replace(coi.group(0), '<script>document.documentElement.classList.add("embed")</script>\n', 1)
+emb = emb.replace('<meta property="og:url" content="https://webmvs.com/">', '<meta property="og:url" content="https://webmvs.com/embed">\n<link rel="canonical" href="https://webmvs.com/">', 1)
+wr('embed.html', emb.encode())
+
 # 7. entry manifest, 404 page, .nojekyll, _headers
 build_id = sha(''.join(f'{k}={v}\n' for k, v in sorted(names.items())).encode())[:HASHLEN]
 entry = {'format': 1, 'build': build_id, 'built': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
@@ -199,6 +209,22 @@ headers = f"""# Cloudflare Pages / Netlify. Made by scripts/bundle.sh. GitHub Pa
   Cache-Control: {NOC}
 /coi-serviceworker.js
   Cache-Control: {NOC}
+/og.png
+  Cache-Control: public, max-age=3600
+/player.png
+  Cache-Control: public, max-age=3600
+/embed
+  ! Cross-Origin-Opener-Policy
+  ! Cross-Origin-Embedder-Policy
+  Document-Isolation-Policy: isolate-and-require-corp
+  Content-Security-Policy: frame-ancestors 'self' https://x.com https://*.x.com https://twitter.com https://*.twitter.com
+  Cache-Control: {NOC}
+/embed.html
+  ! Cross-Origin-Opener-Policy
+  ! Cross-Origin-Embedder-Policy
+  Document-Isolation-Policy: isolate-and-require-corp
+  Content-Security-Policy: frame-ancestors 'self' https://x.com https://*.x.com https://twitter.com https://*.twitter.com
+  Cache-Control: {NOC}
 """
 wr('_headers', headers.encode())
 
@@ -224,7 +250,7 @@ for d in ('assets', 'runtime', 'conf', 'boot', 'dasd'):
             mm = pat.search(f)
             if not mm: sys.exit(f'bundle-hash: {r}: in an immutable dir without a content hash')
             if sha(open(p, 'rb').read())[:HASHLEN] != mm.group(1): sys.exit(f'bundle-hash: {r}: hash does not match the content')
-for p in ('index.html', 'coi-serviceworker.js', 'entry.json'):
+for p in ('index.html', 'embed.html', 'coi-serviceworker.js', 'entry.json'):
     if not os.path.exists(os.path.join(OUT, p)): sys.exit(f'bundle-hash: missing {p}')
 
 # BUILD-INFO.json: same content as mk-dist-dev.sh's, with the final file names

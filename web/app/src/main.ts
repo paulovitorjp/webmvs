@@ -501,13 +501,17 @@ function setupSaveState(): void {
 }
 
 // ------------------------------------------------------------------ boot
+/** /embed (X player card): a sandboxed frame without top navigation, so links open a new tab. */
+const EMBED = document.documentElement.classList.contains('embed');
+if (EMBED) for (const a of document.querySelectorAll<HTMLAnchorElement>('a[href^="http"]')) { a.target = '_blank'; a.rel = 'noopener'; }
+
 /**
  * coi-serviceworker: on a host without COOP/COEP it registers on the first visit and then reloads
  * the page. Do not open any terminal before that reload (a console connection would be dropped in
  * the middle of the telnet negotiation). Returns false if the page is about to reload.
  */
 async function coiSettled(): Promise<boolean> {
-  if (self.crossOriginIsolated) return true;
+  if (self.crossOriginIsolated || EMBED) return true;   // in a frame the service worker cannot isolate the page
   const sw = navigator.serviceWorker;
   if (!window.isSecureContext || !sw) return true;
   if (sw.controller) return true;            // controlled but not isolated: the SW cannot help (old browser)
@@ -523,7 +527,10 @@ async function coiSettled(): Promise<boolean> {
 
 async function boot(): Promise<void> {
   await coiSettled();
-  if (BACKEND === 'wasm' && !self.crossOriginIsolated) throw new Error('this browser did not enable cross-origin isolation (SharedArrayBuffer is needed)');
+  if (BACKEND === 'wasm' && !self.crossOriginIsolated) {
+    throw new Error(EMBED ? 'this browser cannot run MVS inside the post (it needs desktop Chrome or Edge 137+). Open the full site instead'
+      : 'this browser did not enable cross-origin isolation (SharedArrayBuffer is needed)');
+  }
   setupDebug(); setupAbout(); buildKeypad(); wireCapture(); setupHistory();
   $('add-tso').addEventListener('click', () => { const t = addTso(); userPicked = true; select(t.id); void connectTso(t); });
   machine.onLog((l, historic) => {

@@ -27,4 +27,6 @@ copy(join(tn, 'LICENSE'), 'LICENSE-tn3270.txt');
 copy(join(vendor, 'coi-serviceworker', 'coi-serviceworker.js'), 'coi-serviceworker.js');
 copy(join(vendor, 'coi-serviceworker', 'LICENSE'), 'LICENSE-coi-serviceworker.txt');
 copy(join(here, '_headers'), '_headers');
+copy(join(here, 'og.png'), 'og.png');            // link preview images (index.html meta tags)
+copy(join(here, 'player.png'), 'player.png');
 if (process.argv.includes('--dev')) { mkdirSync(join(out, 'mock'), { recursive: true }); copy(join(here, 'dev', 'mock-runtime.js'), 'mock/mock-runtime.js'); }

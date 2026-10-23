@@ -41,7 +41,7 @@ echo "== page (web/app)"
 echo "== assemble $DIST"
 rm -rf "$DIST.tmp"; mkdir -p "$DIST.tmp"/{runtime,conf,boot/SCRIPTS,dasd}
 A=$REPO/web/app/dist
-cp "$A"/{index.html,app.js,app.js.map,app.css,3270.bdf,coi-serviceworker.js,_headers} "$DIST.tmp/"
+cp "$A"/{index.html,app.js,app.js.map,app.css,3270.bdf,coi-serviceworker.js,_headers,og.png,player.png} "$DIST.tmp/"
 cp "$A"/LICENSE-*.txt "$DIST.tmp/"
 cp "$REPO"/web/runtime/{mvs-runtime.js,tn3270-headless.js,mvs-persist.js,mvs-snapshot.js} "$DIST.tmp/runtime/"
 cp "$HERC_OUT"/hercules.{js,wasm} "$DIST.tmp/runtime/"
