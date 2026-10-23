@@ -9,6 +9,8 @@ button:disabled:hover { border-color: var(--line); }
 kbd { font: 12px ui-monospace, monospace; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 3px; padding: 0 4px; }
 
 #loader { position: fixed; inset: 0; display: grid; place-items: center; }
+/* display: grid above beats the [hidden] attribute, so the hidden loader stayed under #app and showed through */
+#loader[hidden] { display: none; }
 .loader-box { width: min(520px, 90vw); text-align: center; }
 .loader-box h1 { font: 600 34px ui-monospace, "SFMono-Regular", Menlo, monospace; color: var(--green); margin: 0 0 4px; letter-spacing: 2px; }
 .loader-box .sub { color: var(--dim); margin: 0 0 22px; }
@@ -18,7 +20,7 @@ kbd { font: 12px ui-monospace, monospace; border: 1px solid var(--line); border-
 @keyframes slide { 0% { margin-left: -30%; } 100% { margin-left: 100%; } }
 #loader-text { color: var(--dim); font-family: ui-monospace, monospace; font-size: 13px; }
 
-#app { position: fixed; inset: 0; display: flex; flex-direction: column; }
+#app { position: fixed; inset: 0; display: flex; flex-direction: column; background: var(--bg); }
 #app[hidden] { display: none; }
 header { display: flex; align-items: center; gap: 12px; padding: 4px 8px; background: var(--panel); border-bottom: 1px solid var(--line); flex-wrap: wrap; }
 .brand { font: 600 15px ui-monospace, monospace; color: var(--green); letter-spacing: 1px; }
