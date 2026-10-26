@@ -57,7 +57,7 @@ HCOMMIT=$(git -C "$SRC" rev-parse HEAD)
 for n in $PATCHES; do cp "$REPO"/patches/hyperion/"$n"-*.patch "$DIST.tmp/source/patches/hyperion/"; done
 cp "$REPO"/src/wasm/{Makefile.wasm,hdl_static.c,library_webload.js,wasm_main.c,wasmsock.c,wasmsock.h,webrt.c,webrt.h} "$DIST.tmp/source/src/wasm/"
 cp "$REPO"/scripts/{build-wasm.sh,configure-wasm.sh,build-extpkgs-wasm.sh,mk-dasd-chunks.sh,vtamlst-trim.py,mk-dist-dev.sh,mk-seed-shadow.py} "$DIST.tmp/source/scripts/"
-for f in src/wasm/lazydasd.cpp src/wasm/library_lazydasd.js src/wasm/outsink.cpp scripts/build.sh scripts/bundle.sh scripts/bundle-hash.py scripts/dasd-chunk.py scripts/dasd-packs.py src/wasm/library_webload.js web/runtime/mvs-persist.js web/runtime/mvs-snapshot.js scripts/vtamlib-stub.py scripts/vtamlst-edit.py scripts/data/vtamlib-iedia-stub.json scripts/data/vtamlib-iedia-stub.jcl; do if [ -f "$REPO/$f" ]; then mkdir -p "$(dirname "$DIST.tmp/source/$f")"; cp "$REPO/$f" "$DIST.tmp/source/$f"; fi; done   # lazy DASD + persistence, VTAMLIB stub (no IST025I)
+for f in src/wasm/lazydasd.cpp src/wasm/library_lazydasd.js src/wasm/outsink.cpp scripts/build.sh scripts/bundle.sh scripts/bundle-hash.py scripts/dasd-chunk.py scripts/dasd-packs.py src/wasm/library_webload.js web/runtime/mvs-persist.js web/runtime/mvs-snapshot.js scripts/vtamlib-stub.py scripts/vtamlst-edit.py scripts/kicks-install.py scripts/data/vtamlib-iedia-stub.json scripts/data/vtamlib-iedia-stub.jcl; do if [ -f "$REPO/$f" ]; then mkdir -p "$(dirname "$DIST.tmp/source/$f")"; cp "$REPO/$f" "$DIST.tmp/source/$f"; fi; done   # lazy DASD + persistence, VTAMLIB stub (no IST025I)
 cp "$REPO"/conf/{web.cnf,web-browser.rc,web-shutdown.rc} "$DIST.tmp/source/conf/"
 cp "$REPO"/docs/PINS.md "$DIST.tmp/source/PINS.md"
 # Licenses of the source copy: Apache-2.0 for the project code (LICENSE, NOTICE), QPL 1.0 text and the
@@ -103,6 +103,16 @@ tar -xOf "$TAR" MVSCE/herclogo.txt > "$DIST.tmp/boot/herclogo.txt"
 # Seed shadow files (scripts/build.sh seed -> mk-seed-shadow.py): dasd/seed/{seed.json,mvsres_1.cckd}
 SEED=${SEED:-$HOME/build/webmvs/seed}
 if [ -f "$SEED/seed.json" ]; then mkdir -p "$DIST.tmp/dasd/seed"; cp "$SEED"/seed.json "$SEED"/*.cckd "$DIST.tmp/dasd/seed/"; else echo "no seed shadows in $SEED (SMF stays on)"; fi
+# KICKS for TSO (Mike Noel, http://www.kicksfortso.com/): its license allows redistribution of the complete
+# original package only, so the site offers the unmodified distribution zip (scripts/build.sh kicks pins its
+# sha256) and its license text. The KICKS libraries themselves are on the KICKS0 volume (dasd/).
+KICKS_ZIP=${KICKS_ZIP:-$HOME/build/webmvs/kicks/kicks-tso-v1r5m0.zip}
+if [ -f "$KICKS_ZIP" ]; then
+  mkdir -p "$DIST.tmp/kicks"; cp "$KICKS_ZIP" "$DIST.tmp/kicks/kicks-tso-v1r5m0.zip"
+  unzip -p "$KICKS_ZIP" kicks-tso-v1r5m0/kicks-license.txt > "$DIST.tmp/kicks/kicks-license.txt"
+  [ -s "$DIST.tmp/kicks/kicks-license.txt" ] || { echo "no kicks-license.txt in $KICKS_ZIP"; exit 1; }
+  echo "kicks: $(sha256sum "$DIST.tmp/kicks/kicks-tso-v1r5m0.zip" | cut -c1-64)"
+else echo "no KICKS zip ($KICKS_ZIP): run scripts/build.sh kicks"; exit 1; fi
 for f in pjes2 zeod quiesce poweroff; do tar -xOf "$TAR" "MVSCE/SCRIPTS/$f" > "$DIST.tmp/boot/SCRIPTS/$f"; done
 python3 - "$DASD" "$DIST.tmp/dasd" <<'EOF'
 import json, os, shutil, sys

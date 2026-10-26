@@ -5,7 +5,8 @@ Everything runs in your browser tab: no server-side emulator, no websocket proxy
 serves static files.
 
 Runs MVS/CE by Philip Young (https://github.com/MVS-sysgen/sysgen), based on Jay Moseley's MVS 3.8j sysgen
-(http://www.jaymoseley.com/hercules/). Emulation by Hercules Hyperion.
+(http://www.jaymoseley.com/hercules/), with KICKS for TSO by Mike Noel (http://www.kicksfortso.com/), a CICS-like
+transaction monitor that runs under TSO. Emulation by Hercules Hyperion.
 
 You see the IPL on the MVS master console (Console tab), then you log on to TSO in a 3270 terminal
 (TSO tab). TSO user `MVSCE02`, password `PASS4U` (the public MVS/CE defaults).
@@ -15,7 +16,7 @@ You see the IPL on the MVS master console (Console tab), then you log on to TSO 
 ![TSO in the browser](docs/img/tso-chromium.png)
 
 ## What it does
-- About 4 MB of disk data loads before the IPL; the rest of the disks (59 MB in 597 small chunk files) loads only when MVS reads it. A second visit uses the
+- About 4 MB of disk data loads before the IPL; the rest of the disks (61 MB in 613 small chunk files, KICKS included) loads only when MVS reads it. A second visit uses the
   browser cache. Measured (headless Playwright on the build host, cold visit, the test logs
   on after the 1.5 s tab switch): TSO READY 9.4-9.9 s after the page opens in Chromium (WebKit 8.7-9.4 s); with a
   9 Mbit/s link and 60 ms latency 13.4-13.7 s.
@@ -35,6 +36,30 @@ You see the IPL on the MVS master console (Console tab), then you log on to TSO 
 
 Supported: current desktop Chrome/Edge, Firefox, Safari (tested with Playwright Chromium, Firefox and
 WebKit). The wasm memory is 112 MiB; the browser processes use up to about 1 GB in Firefox and WebKit.
+
+## KICKS for TSO
+[KICKS for TSO](http://www.kicksfortso.com/) 1.5.0 by Mike Noel is installed on its own volume, KICKS0
+(device 0351). It is a CICS-like transaction monitor: CICS-style COBOL and C programs run in your TSO session.
+Its disk data loads only when you use it.
+
+1. On the TSO tab, log on as `MVSCE02` (password `PASS4U`).
+2. At `READY`, type `KICKS` and press Enter. KICKS lists the modules it loads; press Enter at `***`.
+3. The KICKS sign-on screen (`KSGM`) shows. Press Clear to get a blank screen, where you type a transaction
+   ID and press Enter.
+4. Try `INQ1`, the customer inquiry from the Murach CICS samples: type `400001` as the customer number and press
+   Enter (customer MCDONALD). PF3 goes to the Murach master menu (`MENU`); PF3 again leaves it.
+5. `BTC0` shows the menu of the TAC sample application; PF12 returns to KICKS.
+6. To leave KICKS: press Clear, type `KSSF` and press Enter. The screen goes blank: press Enter once more for
+   `READY`.
+
+Your own KICKS data sets (`MVSCE02.KICKS.*`) are created at the first start. ANS COBOL (`COBUCLG` and the
+other COBOL procedures) and GCC (in the `GCC` and `PDPCLIB` libraries) are available for your own programs; the
+KICKS User's Guide in the distribution zip shows how to translate, compile and run them.
+
+KICKS is not in this repository: its license allows redistribution of the complete original package only.
+`scripts/build.sh kicks` downloads the distribution zip (sha256 pinned) and installs it with a native Hercules
+(`scripts/kicks-install.py`, following the KICKS installation guide). The site offers the unmodified zip at
+`/kicks/kicks-tso-v1r5m0.zip` with its license, `/kicks/kicks-license.txt`.
 
 ## How it works
 ```
@@ -104,6 +129,7 @@ All versions are pinned in [docs/PINS.md](docs/PINS.md).
    ```
    scripts/build.sh ext       # Hyperion extpkgs (crypto, decNumber, SoftFloat, telnet) for wasm32
    scripts/build.sh build     # patches + emconfigure + make -> hercules.js / hercules.wasm
+   scripts/build.sh kicks     # KICKS for TSO: download (sha256 pinned) + install with native Hercules (about 5 min)
    scripts/build.sh chunks    # lazy DASD chunks + manifest from the MVS/CE volumes (boot traces: dasd/manifest/)
    scripts/build.sh seed      # seed shadow file (SMF off)
    ```
@@ -137,7 +163,9 @@ These parts are NOT under the Apache License and keep their own licenses:
 - the Hercules patches in `patches/hyperion/`: Q Public License 1.0 (the Hercules license,
   [LICENSES/hercules-QPL-1.0.html](LICENSES/hercules-QPL-1.0.html));
 - vendored code: `web/vendor/tn3270/` (MIT), `web/vendor/coi-serviceworker/` (MIT), the 3270 font (BSD-style);
-- MVS 3.8J is public domain; the MVS/CE add-ons keep their own terms.
+- MVS 3.8J is public domain; the MVS/CE add-ons keep their own terms;
+- KICKS for TSO (Mike Noel): its own license (`kicks-license.txt` in the distribution zip, also on the site at
+  `/kicks/kicks-license.txt`). No KICKS file is in this repository.
 
 Each bundle has `LICENSE`, `NOTICE` and the QPL text in its `source/` folder (and `licenses/`, `SOURCE.txt`).
 
@@ -149,6 +177,7 @@ Each bundle has `LICENSE`, `NOTICE` and the QPL text in its `source/` folder (an
 | MVS 3.8J (IBM) | public domain | |
 | [MVS/CE](https://github.com/MVS-sysgen/sysgen) v3.0.0 (MVS-sysgen project) | see its repository | the DASD volumes are built from its release; the sysgen automates Jay Moseley's procedures |
 | [Jay Moseley's MVS 3.8J sysgen](https://www.jaymoseley.com/hercules/) | | the basis of MVS/CE |
+| [KICKS for TSO](http://www.kicksfortso.com/) 1.5.0 (Mike Noel) | KICKS license (`kicks-license.txt`; free use, redistribution of the complete package only) | installed on the KICKS0 volume by `scripts/build.sh kicks`; the site offers the unmodified zip in `/kicks/` |
 | [athornton/tn3270](https://github.com/athornton/tn3270) (Adam Thornton) | MIT | `web/vendor/tn3270/LICENSE` |
 | 3270 font (x3270 BDF font, Paul Mattes, Jeff Sparkes, GTRC) | BSD-style | `web/vendor/tn3270/packages/canvas/assets/LICENSE-3270-font.txt`; see also [rbanffy/3270font](https://github.com/rbanffy/3270font) |
 | [coi-serviceworker](https://github.com/gzuidhof/coi-serviceworker) (Guido Zuidhof) | MIT | `web/vendor/coi-serviceworker/LICENSE` |

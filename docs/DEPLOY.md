@@ -224,4 +224,6 @@ Make the new bundle with `scripts/bundle.sh --tar --keep <the dist of the curren
 files stay in the new deploy, so a tab that still runs the old page (its `index.html` can be 10 minutes old on
 GitHub Pages; a TSO session loads DASD chunks for hours) does not get 404 errors. The cost is the size of the
 changed files (a new wasm: about 4 MB; a new DASD image: up to 59 MB). Drop the old files at the next update.
-A new DASD image also resets every visitor's saved disks (the runtime compares the base-volume sha256s).
+A new DASD image drops the visitor's saved changes on the volumes whose image changed (the runtime compares the
+base-volume sha256s and deletes only those shadow files; the other volumes keep the visitor's data, and the page
+shows a one-time notice). Edit `UPDATE_NOTICE` in `web/app/src/main.ts` for the next image change.

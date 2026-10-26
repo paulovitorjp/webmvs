@@ -93,6 +93,21 @@ export async function listShadows(dir = 'shadow') {
   return out.sort((a, b) => a.name.localeCompare(b.name));
 }
 
+// Delete the shadow files of the given volumes (<vol>_<n>.cckd) from OPFS <dir>. Before Hercules starts only.
+// Returns the names removed; throws if a file could not be removed.
+export async function removeShadows(vols, dir = 'shadow') {
+  const root = await navigator.storage.getDirectory();
+  let d;
+  try { d = await root.getDirectoryHandle(dir); } catch { return []; }
+  const names = [];
+  for await (const [name, h] of d.entries()) {
+    const m = /^(.+)_\d+\.cckd$/.exec(name);
+    if (h.kind === 'file' && m && vols.includes(m[1])) names.push(name);
+  }
+  for (const name of names) await d.removeEntry(name);
+  return names.sort();
+}
+
 // Bytes of one shadow file (tests: copy the shadows out for cckdcdsk). Only while Hercules is stopped.
 export async function readShadow(name, dir = 'shadow') {
   const root = await navigator.storage.getDirectory();

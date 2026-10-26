@@ -70,7 +70,8 @@ window.coi = { doReload: function () {
     <p id="loader-open" class="attrib"><a href="https://webmvs.com/" target="_blank" rel="noopener">Open the full site</a></p>
     <p class="attrib">Runs <a href="https://github.com/MVS-sysgen/sysgen">MVS/CE</a> by Philip Young, based on Jay Moseley's
     <a href="http://www.jaymoseley.com/hercules/">MVS 3.8j sysgen</a>. Emulation by
-    <a href="https://github.com/SDL-Hercules-390/hyperion">Hercules Hyperion</a>.</p>
+    <a href="https://github.com/SDL-Hercules-390/hyperion">Hercules Hyperion</a>.
+    <a href="http://www.kicksfortso.com/">KICKS for TSO</a> by Mike Noel.</p>
     <p id="loader-actions" hidden><button id="loader-retry" type="button">Try again</button></p>
   </div>
 </div>
@@ -101,7 +102,8 @@ window.coi = { doReload: function () {
   </main>
   <footer class="attrib">webmvs by <a href="https://github.com/paulovitorjp">Paulo Pereira (@paulovitorjp)</a>. Runs <a href="https://github.com/MVS-sysgen/sysgen">MVS/CE</a> by Philip Young, based on Jay Moseley's
     <a href="http://www.jaymoseley.com/hercules/">MVS 3.8j sysgen</a>. Emulation by
-    <a href="https://github.com/SDL-Hercules-390/hyperion">Hercules Hyperion</a>.</footer>
+    <a href="https://github.com/SDL-Hercules-390/hyperion">Hercules Hyperion</a>.
+    <a href="http://www.kicksfortso.com/">KICKS for TSO</a> by Mike Noel.</footer>
   <div id="hint"></div>
   <div id="keypad" hidden></div>
   <div id="debug" hidden>
@@ -118,7 +120,8 @@ window.coi = { doReload: function () {
   <p>This page runs IBM MVS 3.8J on the Hercules System/370 emulator. Two terminals:
     <b>Console</b> is the MVS master console (device 0010; you see the IPL there and can type operator commands),
     <b>TSO</b> is a 3270 terminal for TSO (devices 0400-0403).</p>
-  <p>TSO user: <b>MVSCE02</b>, password <b>PASS4U</b>.</p>
+  <p>TSO user: <b>MVSCE02</b>, password <b>PASS4U</b>. At <b>READY</b>, type <b>KICKS</b> to start KICKS for TSO
+    (try transaction <b>INQ1</b> with customer <b>400001</b>; leave with Clear, <b>KSSF</b>).</p>
   <table class="keys">
     <tr><td>Enter</td><td>Enter</td><td>Esc</td><td>Clear</td></tr>
     <tr><td>F1-F12, Shift+F1-F12</td><td>PF1-PF24</td><td>Ctrl+1 / 2 / 3</td><td>PA1 / PA2 / PA3</td></tr>
@@ -131,6 +134,8 @@ window.coi = { doReload: function () {
       (<a href="./licenses/hercules-QPL-1.0.html">license</a>). This page runs a modified Hercules: see the
       <a href="./SOURCE.txt">source notice</a> (upstream commit, <a href="./source/">patches and new source files</a>).</li>
     <li><a href="https://github.com/MVS-sysgen/sysgen">MVS/CE</a> (MVS Community Edition), MVS-sysgen project.</li>
+    <li><a href="http://www.kicksfortso.com/">KICKS for TSO</a> 1.5.0 by Mike Noel: the unmodified
+      <a href="./kicks/kicks-tso-v1r5m0.zip">distribution zip</a> and its <a href="./kicks/kicks-license.txt">license</a>.</li>
     <li>Based on the MVS 3.8J sysgen by <a href="https://www.jaymoseley.com/hercules/">Jay Moseley</a>. MVS 3.8J is public domain.</li>
     <li>3270 terminal: <a href="https://github.com/athornton/tn3270">athornton/tn3270</a>, MIT license.</li>
     <li>3270 font: x3270 3270 font (Paul Mattes, Jeff Sparkes, GTRC), see <a href="./LICENSE-3270-font.txt">license</a>.</li>

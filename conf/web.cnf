@@ -45,7 +45,7 @@ HERCLOGO  herclogo.txt
 000E    1403    printers/prt00e.txt                   # JES2 PRINTER1
 000F    3211    printers/prt00f.txt                   # JES2 PRINTER2
 001D    3525    punchcards/pch01d.txt ascii
-# ----------------------------------------------- DASD (web set, shadow files; 8 volumes)
+# ----------------------------------------------- DASD (web set, shadow files; 9 volumes)
 0150    3350    DASD/mvsres.3350           sf=shadow/mvsres_*.cckd
 0151    3350    DASD/mvs000.3350           sf=shadow/mvs000_*.cckd
 0152    3350    DASD/page00.3350           sf=shadow/page00_*.cckd
@@ -61,6 +61,7 @@ HERCLOGO  herclogo.txt
 # SYS1.CMDPROC(REVINIT) allocates &SYSUID..ISP.PROF NEW at each TSO logon (IBMUSER: IEF238D operator reply;
 # MVSCE01/02: NOT ALLOCATED, VOLUME NOT AVAILABLE). 1,094,964 bytes, almost empty.
 0251    3350    DASD/work00.3350           sf=shadow/work00_*.cckd
+0351    3350    DASD/kicks0.3350           sf=shadow/kicks0_*.cckd   # KICKS for TSO (scripts/build.sh kicks)
 # ----------------------------------------------- consoles
 0010    3270    CONSOLE      # master console (terminal group name; client asks for @0010 or @CONSOLE)
 0009    3215-C  /            # alternate console (required for HAO automation)

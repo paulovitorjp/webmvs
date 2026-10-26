@@ -99,6 +99,8 @@ function select(id: string): void {
   t?.view?.paint();
   focusTerminal();
 }
+/** shown once after a new image replaced the saved changes of system volumes (see setupPersist / persist.upgrade) */
+const UPDATE_NOTICE = 'webmvs was updated with KICKS; system changes you saved were replaced (your data sets are kept).';
 function renderHint(t: Tab | undefined): void {
   $('hint').innerHTML = (t?.notice ? `<span class="notice">${t.notice}</span> ` : '') + (t?.hint ?? '');
 }
@@ -191,7 +193,7 @@ function addTso(): Tab {
   tsoCount++;
   const id = `tso${tsoCount}`;
   const hint = tsoCount === 1
-    ? 'TSO: press <kbd>Enter</kbd>, then type <b>LOGON MVSCE02</b> and <kbd>Enter</kbd>. Password: <b>PASS4U</b>. End with <b>LOGOFF</b>.'
+    ? 'TSO: press <kbd>Enter</kbd>, then type <b>LOGON MVSCE02</b> and <kbd>Enter</kbd>. Password: <b>PASS4U</b>. At <b>READY</b>, <b>KICKS</b> starts KICKS for TSO. End with <b>LOGOFF</b>.'
     : `TSO session ${tsoCount}: one user ID can be logged on only once. Use <b>MVSCE01</b> / <b>CUL8TR</b> here if MVSCE02 is in use.`;
   const t = makeTab(id, tsoCount === 1 ? 'TSO' : `TSO ${tsoCount}`, hint);
   return t;
@@ -598,6 +600,13 @@ async function boot(): Promise<void> {
   $('loader').hidden = true;
   $('app').hidden = false;
   select('console');
+  // A new image replaced system volumes that had saved changes (runtime persist.upgrade): say it once.
+  const up = pi?.upgrade;
+  if (up && up.removed.length) {
+    con.notice = tso.notice = UPDATE_NOTICE;
+    renderHint(tabs.get(active));
+    dlog(`[persist] new image: removed ${up.removed.join(', ')}; kept ${up.kept.join(', ') || '-'}`);
+  }
 
   if (CONSOLE_MODE === 'early') {
     loader('Connecting the master console ...');
@@ -638,7 +647,8 @@ async function boot(): Promise<void> {
   // reset, starts from the original disks.
   const savedDisks = pi2?.opfs ? pi2.opfs.files.length > 0 : (pi2?.marker?.state ?? 'new') !== 'new';
   status(pi2?.enabled
-    ? (pi2.reset ? `IPL 150 from the original disks (${/^base image changed/.test(pi2.resetWhy ?? '') ? 'new MVS disk images' : 'machine reset'}) ...`
+    ? (pi2.upgrade?.removed.length && !pi2.reset ? 'IPL 150 from your saved disks, with the new system disks ...'
+      : pi2.reset ? `IPL 150 from the original disks (${/^base image changed/.test(pi2.resetWhy ?? '') ? 'new MVS disk images' : 'machine reset'}) ...`
       : !savedDisks ? 'IPL 150 from the original disks (first visit) ...'
       : pi2.dirtyStart ? 'IPL 150 from your saved disks (last session not shut down) ...' : 'IPL 150 from your saved disks ...')
     : 'IPL 150 ...');

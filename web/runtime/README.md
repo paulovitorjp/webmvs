@@ -120,8 +120,14 @@ writes go to the shadows (with a writable base CCKD opens it R/W and never uses 
   `000A0000 00000CCC`, or an `HHC003nnE` CCKD error -> state `iplfail {reason, dirtyStart}`; the page
   offers "Reset machine" (`?autoreset=1` accepts it, for tests).
 - Base check: the marker records the sha256 of every base volume (`manifest.json`) and of every seed
-  file; when one of them changes (a new image), the next start resets the shadows (`resetWhy: 'base
-  image changed: <names>'`), because a shadow is only valid on the base image it was written on.
+  file; when one of them changes (a new image), the next start deletes the shadow files of the changed
+  volumes only (`<vol>_*.cckd`; a seed file counts for its volume; a new MVS000 also drops SPOOL1, because the
+  JES2 checkpoint on MVS000 must match the spool), in the main thread before the loader
+  runs, because a shadow is only valid on the base image it was written on. The other volumes keep the
+  visitor's data. `rt.persist.upgrade = {changed, volumes, removed, kept}` tells the page (it shows a
+  one-time notice). If a file cannot be deleted, the whole shadow directory is reset instead
+  (`resetWhy: 'base image changed: <names> (...)'`). A new image also changes the snapshot fingerprint,
+  so a saved memory snapshot is discarded and the machine IPLs.
 - `rt.requestReset(why)`: sets `resetPending`; the NEXT load deletes `shadow/` in the loader before
   Hercules starts (so a reset never happens while Hercules has the files open). `why` starting with
   `auto` counts as an automatic reset (`marker.autoResets`).
@@ -262,5 +268,5 @@ never written). The shadow files are on a separate mount: without persistence `s
 (mounted by `wasm_main --opfs=/opfs`) `sf=/opfs/shadow/<vol>_*.cckd`. Either works with the lazy base: CCKD
 reads a track from the shadow if the shadow has it, else from the base (lazy chunk). A shadow is only valid
 on top of the same base image: keep `manifest.volumes[].sha256` (whole-file sha256 of the base image) with the
-shadows and reset them when it changes (for example after an image change such as the LCL400 trim). The base
+shadows and drop them when it changes (for example after an image change such as the LCL400 trim). The base
 chunk cache (Cache Storage) is read-only and content-addressed, so tabs can share it without the Web Lock.

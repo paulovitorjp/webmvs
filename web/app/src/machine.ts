@@ -78,6 +78,8 @@ export interface PersistInfo {
   opfs?: { files: { name: string; size: number }[]; seeded: { name: string; size: number }[]; reset: boolean; waitMs: number; retries: number } | null;
   marker?: Record<string, unknown> | null;
   iplFail?: { reason: string; dirtyStart: boolean } | null;
+  /** a new image changed some base volumes: their shadow files were deleted before the start, the others kept */
+  upgrade?: { changed: string[]; volumes: string[]; removed: string[]; kept: string[] } | null;
   diskErrors?: string[];
   lock?: { ok: boolean; waitedMs: number } | null;
 }

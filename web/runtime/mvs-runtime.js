@@ -28,7 +28,7 @@
 // 0400 pool). ttype is also used here to find the console (tap) and the screen size.
 
 import { Screen3270, frameRecord, AID, T, TelnetDecoder } from './tn3270-headless.js';
-import { acquireMachineLock, MachineMarker, opfsAvailable, listShadows, readShadow } from './mvs-persist.js';
+import { acquireMachineLock, MachineMarker, opfsAvailable, listShadows, readShadow, removeShadows } from './mvs-persist.js';
 import { SnapIO, SNAP_DEFAULTS, SNAP_FORMAT, planResume, slotDone, readIntent, writeIntent, sha256Hex, screenRecord, b64, countRecords, schedDecision } from './mvs-snapshot.js';
 export { acquireMachineLock, MachineMarker, listShadows, readShadow } from './mvs-persist.js';
 
@@ -121,6 +121,8 @@ const DEFAULTS = {
   // ?snap.<key>=<value> overrides. See web/runtime/README.md "Snapshot".
   snapshot: null,
 };
+// volumes whose saved shadows are dropped together when the base image of the first one changes (persistSetup)
+const COUPLED_VOLUMES = { mvs000: ['spool1'] };
 const PERSIST_DEFAULTS = {
   mount: '/opfs',          // WasmFS OPFS backend mount point (wasm_main --opfs=)
   dir: 'shadow',           // OPFS directory of the shadow files: sf=/opfs/shadow/<vol>_*.cckd
@@ -401,7 +403,8 @@ export class MvsRuntime {
     info.seedFiles = seed.map((f) => f.name);
     // A shadow file is only valid on the base image it was written on. Record the base volume
     // sha256s (manifest) and the seed sha256s; if they change (new image, e.g. a rebuilt volume),
-    // the old shadows must go: reset before the start.
+    // the shadows of the changed volumes go before the start (the other volumes keep the visitor's
+    // data): info.upgrade. If that fails, all shadows go (reset).
     info.base = {};
     try {
       if (this.o.manifest) {
@@ -412,7 +415,20 @@ export class MvsRuntime {
     for (const f of seed) info.base[`seed:${f.name}`] = f.sha256 || '';
     if (!info.reset && m.base && m.state !== 'new') {
       const changed = Object.keys({ ...m.base, ...info.base }).filter((k) => m.base[k] !== info.base[k]);
-      if (changed.length) { info.reset = true; info.dirtyStart = false; info.resetWhy = `base image changed: ${changed.join(', ')}`; }
+      if (changed.length) {
+        // volume names as in the shadow file names: 'mvsres.3350' -> mvsres, 'seed:mvsres_1.cckd' -> mvsres
+        const vols = [...new Set(changed.map((k) => (k.startsWith('seed:') ? k.slice(5).replace(/_\d+\.cckd$/, '') : k.replace(/\.[^.]+$/, ''))))];
+        // the JES2 checkpoint (SYS1.HASPCKPT, MVS000) and the spool (SPOOL1) belong together: a new MVS000 also
+        // drops the saved spool, else JES2 warm-starts with a checkpoint that does not match the spool
+        for (const [v, also] of Object.entries(COUPLED_VOLUMES)) if (vols.includes(v)) for (const x of also) if (!vols.includes(x)) vols.push(x);
+        try {
+          const removed = await removeShadows(vols, p.dir);
+          info.upgrade = { changed, volumes: vols, removed, kept: (await listShadows(p.dir)).map((f) => f.name) };
+          this.note(`persist: base image changed (${changed.join(', ')}): removed ${removed.join(', ') || 'no files'}, kept ${info.upgrade.kept.join(', ') || 'no files'}`);
+        } catch (e) {
+          info.reset = true; info.dirtyStart = false; info.resetWhy = `base image changed: ${changed.join(', ')} (${e})`;
+        }
+      }
     }
     const cnfUrl = abs(this.o.files.find(([path]) => path === this.o.cnf)?.[1] ?? this.o.cnf);
     const r = await fetch(cnfUrl, { credentials: 'same-origin' });
