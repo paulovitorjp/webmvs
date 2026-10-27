@@ -278,6 +278,36 @@ const shot = async (name, always = false) => {
   shots.push([name, a, pnow()]);
 };
 const unlocked = (id) => waitFn((i) => window.mvs.unlocked(i), id, 30000, `${id} keyboard unlocked`);
+// Selection with the mouse on a tab: drag over `len` cells of the first row matching `re` (from the match on), the
+// selection and the Copy button show, Ctrl+C copies it; then a plain click moves the cursor (cell row/col).
+async function selectionCheck(id, re, len, label) {
+  const rows = (await ev((i) => window.mvs.text(i), id)).split('\n');
+  const row = rows.findIndex((l) => re.test(l));
+  if (row < 0) throw new Error(`selection: no row matches ${re}`);
+  const col = rows[row].search(re); let want = rows[row].slice(col, col + len).trimEnd();
+  const a = await ev(([i, r, c]) => window.mvs.cellCenter(i, r, c), [id, row, col]);
+  const b = await ev(([i, r, c]) => window.mvs.cellCenter(i, r, c), [id, row, col + len - 1]);
+  await page.mouse.move(a.x, a.y); await page.mouse.down();
+  await page.mouse.move((a.x + b.x) / 2, b.y, { steps: 4 }); await page.mouse.move(b.x, b.y, { steps: 4 }); await page.mouse.up();
+  const sel = await ev((i) => window.mvs.selection(i), id);
+  // the console may have rolled meanwhile: the selection is those cells as they are now
+  const now = (await ev((i) => window.mvs.text(i), id)).split('\n')[row].slice(col, col + len).trimEnd();
+  check(`${label}: mouse drag selects text (highlight, Copy button)`, (sel.text === want || sel.text === now) && sel.text.length > 0 && sel.copyButton, { want, now, ...sel });
+  want = sel.text;
+  await shot(`${id}-selection`);
+  await page.keyboard.press(process.platform === 'darwin' ? 'Meta+c' : 'Control+c');
+  const copied = await waitFn((i) => window.mvs.selection(i).lastCopy, id, 5000, 'copied text').catch(() => '');
+  check(`${label}: Ctrl+C copies the selection`, copied === want, { want, copied });
+  // a click without a drag: no selection, the cursor goes to the cell (last row, column 10)
+  const last = rows.length - 1;
+  const p = await ev(([i, r, c]) => window.mvs.cellCenter(i, r, c), [id, last, 10]);
+  const hit = await ev(([x, y]) => { const e = document.elementFromPoint(x, y); return `${e?.tagName}.${e?.className}#${e?.id}`; }, [p.x, p.y]);
+  await page.mouse.click(p.x, p.y);
+  await page.waitForTimeout(300);
+  const after = await ev((i) => ({ sel: window.mvs.selection(i), cursor: window.mvs.fields(i)?.cursor }), id);
+  check(`${label}: a click moves the cursor and ends the selection`, after.cursor === last * 80 + 10 && !after.sel.text && !after.sel.copyButton,
+    { cursor: after.cursor, want: last * 80 + 10, sel: after.sel.text, hit, p, log: (await ev((i) => window.mvs.kbdlog(i), id)).slice(-5) });
+}
 async function typeLine(id, s) { await unlocked(id); await page.keyboard.type(s, { delay: 15 }); await page.keyboard.press('Enter'); }
 const herclog = () => ev(() => window.mvs?.herclog() ?? []).catch(() => []);
 const ikt = { at: null, poll: 0 };
@@ -435,6 +465,14 @@ try {
   // 3270 status line (OIA) under the screen: '4' (reverse) 'A' (underlined) ... cursor rrr/ccc
   const oia = await ev(() => (window.mvs.oia ? { tso1: window.mvs.oia('tso1'), console: window.mvs.oia('console') } : null));
   if (oia) { res.oia = oia; check('OIA: 4 A and cursor position', /^4A\s.*\d{3}\/\d{3}$/.test(oia.tso1), oia); }
+  // the cursor blinks (prefers-reduced-motion: solid): seen on and off within ~1.5 s
+  {
+    const bl = await ev(async () => { const seen = new Set(); const t0 = performance.now();
+      while (performance.now() - t0 < 1600) { seen.add(window.mvs.blink('tso1').on); await new Promise((r) => setTimeout(r, 50)); }
+      return { ...window.mvs.blink('tso1'), seen: [...seen] }; });
+    check('TSO: the cursor blinks', bl.enabled && bl.seen.length === 2, bl);
+  }
+  await selectionCheck('tso1', /TIME-\d\d/, 13, 'TSO');
 
   // 7. D T on the Console tab
   await page.click('button.tab[data-tab="console"]');
@@ -450,6 +488,23 @@ try {
     IST025Ilog: window.mvs.herclog().filter(([, l]) => /IST025I/.test(l)).length }));
   await page.waitForTimeout(500);
   await shot('console');
+  await selectionCheck('console', /IEE136I/, 7, 'Console');
+  // touch (synthetic pointer events, pointerType touch): hold still, then drag selects; a short tap moves the cursor
+  {
+    const r = await ev(async () => {
+      const v = document.querySelector('#view-console canvas.screen');
+      const rows = window.mvs.text('console').split('\n'); const row = rows.findIndex((l) => /IEE136I/.test(l)); const col = rows[row].indexOf('IEE136I');
+      const at = (r2, c2) => window.mvs.cellCenter('console', r2, c2);
+      const fire = (type, p) => v.dispatchEvent(new PointerEvent(type, { pointerId: 7, pointerType: 'touch', isPrimary: true, button: type === 'pointermove' ? -1 : 0, clientX: p.x, clientY: p.y, bubbles: true, cancelable: true }));
+      const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
+      const a = at(row, col), b = at(row, col + 6);
+      fire('pointerdown', a); await sleep(700); fire('pointermove', b); fire('pointerup', b);
+      const sel = window.mvs.selection('console'); const want = window.mvs.text('console').split('\n')[row].slice(col, col + 7);
+      const t = at(23, 20); fire('pointerdown', t); await sleep(80); fire('pointerup', t); await sleep(100);
+      return { want, sel, afterTap: window.mvs.selection('console'), cursor: window.mvs.fields('console')?.cursor };
+    });
+    check('Console: touch long press + drag selects, a tap moves the cursor', r.sel.text === r.want && r.sel.copyButton && !r.afterTap.text && r.cursor === 23 * 80 + 20, r);
+  }
 
   // 8. logoff
   await page.click('button.tab[data-tab="tso1"]');

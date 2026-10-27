@@ -51,7 +51,9 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 #views { flex: 1; min-height: 0; position: relative; background: #000; }
 .view { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; overflow: hidden; }
 .view[hidden] { display: none; }
-canvas.screen { display: block; image-rendering: pixelated; image-rendering: crisp-edges; touch-action: manipulation; }
+canvas.screen { display: block; image-rendering: pixelated; image-rendering: crisp-edges; touch-action: manipulation; cursor: text; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+.term-copy { position: absolute; top: 8px; right: 8px; z-index: 5; border-color: var(--accent); box-shadow: 0 2px 8px #000a; }
+.term-copy[hidden] { display: none; }
 .placeholder { position: absolute; inset: 0; display: grid; place-items: center; color: var(--dim); font: 14px ui-monospace, monospace; padding: 20px; text-align: center; background: #000; }
 .placeholder[hidden] { display: none; }
 .latelog { color: var(--green); font: 13px/1.35 ui-monospace, monospace; text-align: left; margin: 0; white-space: pre; }

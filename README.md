@@ -31,6 +31,10 @@ You see the IPL on the MVS master console (Console tab), then you log on to TSO 
 - Console tab: the real MVS master console (3270 at device 0010). You can type operator commands
   (for example `D A,L`).
 - TSO tab: TSO on 3270 terminals 0400-0403. `+` opens one more TSO session.
+- Copy text from either tab: drag with the mouse to select a rectangle (as in x3270), then press Ctrl+C (Cmd+C)
+  or the **Copy** button. On a touch screen, hold your finger still for a moment, then drag. A click or a tap
+  without a drag moves the cursor there. The cursor blinks, except while you type and when your system asks for
+  reduced motion (`?blink=0` turns the blink off).
 - Your disks are saved in your browser (OPFS). A data set member that you save is still there after a reload.
   Use **Shut down** before you close the tab; **Reset machine** goes back to the original disks.
 - On a phone the terminal gets most of the screen: **?** shows how to log on, **i** the credits, and **⋯**
@@ -138,6 +142,16 @@ jobs), which needs IBM MQ.
 
 Batch: the file readers CBACT02C, CBACT03C and CBCUS01C are in `CARDDEMO.LOADLIB`; the job
 `CARDDEMO.JCL(READALL)` runs them (`SUBMIT 'CARDDEMO.JCL(READALL)'` at `READY`).
+
+Interest: `CARDDEMO.JCL(INTCALC)` runs the interest calculator CBACT04C (`SUBMIT 'CARDDEMO.JCL(INTCALC)'`). For
+each transaction category balance (`CARDDEMO.TCATBALF.KSDS`) it looks up the yearly rate of the account's
+disclosure group (`CARDDEMO.DISCGRP.KSDS`, else the `DEFAULT` group), writes a month's interest as a
+transaction to `CARDDEMO.SYSTRAN` (a new data set each run) and adds it to the account balance
+(`CARDDEMO.ACCTDATA.KSDS`). The upstream sample balances are all zero; here they are the sums of the sample
+transactions (what posting them would leave), so the job charges interest (account `00000000001`: 38.20 on a
+purchase balance of 3,056.53 at 15%). The job first copies the card cross-reference to
+`CARDDEMO.XREFACCT.KSDS`, keyed by account number: the program reads it by account, which the original does
+through an alternate index. Each run charges interest again.
 
 Not in this version: the MQ parts of CardDemo and the batch jobs that need SORT, Db2 or IMS batch (or language
 features this COBOL does not have). The data files are read and written by the programs that work; your

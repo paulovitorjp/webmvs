@@ -11,7 +11,7 @@ PORTED = {'COACTVWC', 'COCRDLIC', 'COCRDSLC', 'COTRN00C', 'COTRN01C', 'COUSR00C'
           'COPAUS1C', 'COPAUS2C'}
 NOT_AVAILABLE = 'is not available in this version'
 
-ABEND = ("CALL 'CEE3ABD' USING ABCODE, TIMING.", "STOP RUN.")
+ABEND = ("CALL 'CEE3ABD' USING ABCODE, TIMING.", "MOVE 16 TO RETURN-CODE STOP RUN.")   # the step ends CC 16
 
 
 def menu(programs):
@@ -189,7 +189,21 @@ FIXES = {
                  # the table of JCL lines REDEFINES the job: as many lines, not 1000
                  ('05 JOB-LINES OCCURS 1000 TIMES PIC X(80).',
                   f"05 JOB-LINES OCCURS {len(TRANREPT_JCL.splitlines())} TIMES PIC X(80).")],
-    'CBACT02C': [ABEND], 'CBACT03C': [ABEND], 'CBCUS01C': [ABEND],
+    'CBACT02C': [ABEND], 'CBACT03C': [ABEND], 'CBCUS01C': [ABEND], # interest calculation: the card cross-reference is read by account number, through the alternate index path
+    # (INTCALC's XREFFILE DD); the read of the default disclosure group gets its INVALID KEY (random access)
+    'CBACT04C': [ABEND, ('RECORD KEY IS FD-XREF-CARD-NUM ALTERNATE RECORD KEY IS FD-XREF-ACCT-ID',
+                         'RECORD KEY IS FD-XREF-ACCT-ID'),
+                 ('KEY IS FD-XREF-ACCT-ID INVALID KEY', 'INVALID KEY'),
+                 ("READ DISCGRP-FILE INTO DIS-GROUP-RECORD IF DISCGRP-STATUS = '00' MOVE 0",
+                  "MOVE '00' TO DISCGRP-STATUS READ DISCGRP-FILE INTO DIS-GROUP-RECORD INVALID KEY MOVE '23' TO DISCGRP-STATUS END-READ "
+                  "IF DISCGRP-STATUS = '00' MOVE 0"),
+                 # the converted INVALID KEY sets no FILE STATUS: the fallback to the DEFAULT group tests it
+                 ("INVALID KEY DISPLAY 'DISCLOSURE GROUP RECORD MISSING'",
+                  "INVALID KEY MOVE '23' TO DISCGRP-STATUS DISPLAY 'DISCLOSURE GROUP RECORD MISSING'"),
+                 # an ISAM record area is the I/O buffer: the failed read lost the type and category of the key
+                 ("MOVE 'DEFAULT' TO FD-DIS-ACCT-GROUP-ID",
+                  "MOVE 'DEFAULT' TO FD-DIS-ACCT-GROUP-ID MOVE TRANCAT-CD TO FD-DIS-TRAN-CAT-CD "
+                  "MOVE TRANCAT-TYPE-CD TO FD-DIS-TRAN-TYPE-CD")],
     # no transaction between the dates: at the end of the (empty) file the record area has no amount to add
     'CBTRN03C': [ABEND, ("DISPLAY 'WS-PAGE-TOTAL' WS-PAGE-TOTAL ADD TRAN-AMT",
                          "DISPLAY 'WS-PAGE-TOTAL' WS-PAGE-TOTAL "

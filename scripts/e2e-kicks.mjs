@@ -14,7 +14,7 @@
 //                      shows the update notice
 //   --carddemo   after KICKS: CARDDEMO, sign on USER0001, account 00000000001 (Immanuel Kessler), a menu option
 //                pending authorizations of 00000000013 (PF5 on the first marks it as fraud or not), bill payment of account 00000000001, PF3 to the sign-on
-//                screen, PF3, KSSF; a card update, a transaction report (REVIEW shows it at READY); then ADMIN001
+//                screen, PF3, KSSF; a card update, a transaction report (REVIEW shows it at READY), the interest job; then ADMIN001
 //                adds user A0WEBMVS and the user list shows it, adds transaction type 50 and deletes it in the list;
 //                --carddemo-only: the same without the KICKS samples
 //   --mobile     iPhone-sized viewport with touch (layout sanity: no horizontal overflow, terminal visible)
@@ -343,6 +343,24 @@ try {
     check('CardDemo: the report shows in REVIEW (header and transactions)', /DALYREPT/.test(t) && rptLines.length > 0,
       [t.split('\n').find((l) => /DALYREPT/.test(l)), ...rptLines.slice(0, 2)].map((l) => (l || '').trim()));
     await shot('carddemo-report');
+    await key('F3'); await ready(60000);
+    // the interest job: SUBMIT at READY, then REVIEW shows the interest transactions it wrote to CARDDEMO.SYSTRAN
+    // (the id starts with the job's date parameter 2022071800, type 01, category 0005)
+    await key('Escape'); await typeLine("submit 'carddemo.jcl(intcalc)'");
+    await ready(60000);
+    for (let i = 0; ; i++) {
+      await sleep(5000);
+      await key('Escape'); await typeLine("review 'carddemo.systran'");
+      await sleep(3000); t = await text();
+      if (/2022071800000001010005/.test(t)) break;
+      if (i > 20) { console.log(t); throw new Error('no interest transactions in CARDDEMO.SYSTRAN'); }
+      if (!/READY\s*$/m.test(t)) { await key('F3'); }
+      await ready(60000);
+    }
+    const intLines = t.split('\n').filter((l) => /20220718\d{8}010005/.test(l));
+    check('CardDemo: the interest job (INTCALC) writes interest transactions', intLines.length > 1,
+      intLines.slice(0, 2).map((l) => l.trim().slice(0, 60)));
+    await shot('carddemo-interest');
     await key('F3'); await ready(60000);
     await signon();
     await sleep(1500); await key('Home'); await page.keyboard.type('ADMIN001PASSWORD', { delay: 20 }); await page.keyboard.press('Enter');

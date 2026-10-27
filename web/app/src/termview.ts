@@ -13,11 +13,26 @@ import { blit, blankColumns, tintKey, rgbCss, type Ctx2D } from '../../vendor/tn
 import { parseBdf } from '../../vendor/tn3270/packages/canvas/src/bdf.js';
 import { ebcdicToCg, column } from '../../vendor/tn3270/packages/canvas/src/cg.js';
 import type { AtlasGeometry, DrawCell } from '../../vendor/tn3270/packages/canvas/src/geometry.js';
+import { normalizeRect, isEmptyRect, extractText, type CellAddr, type CellRect } from '../../vendor/tn3270/packages/canvas/src/selection.js';
 import type { Rgb } from '@tn3270/core';
 
 /** terminal width (CSS px) below which the rows may be stretched vertically, and the most they stretch */
 const NARROW_PX = 700;
 const STRETCH_MAX = 1.6;
+
+/**
+ * The cursor blinks (x3270 cursorBlink), every BLINK_MS, except with prefers-reduced-motion or ?blink=0. It is
+ * solid while you type: each key starts a new 'on' phase.
+ */
+const BLINK = new URLSearchParams(location.search).get('blink') !== '0';
+const BLINK_MS = 530;
+/**
+ * Selection (x3270 style, rectangular: a 3270 screen is columns): drag with the mouse; on a touch screen hold a
+ * finger still for LONG_PRESS_MS, then drag. Ctrl+C / Cmd+C or the Copy button copies the text (hidden fields as
+ * blanks). A click or a tap without a drag moves the cursor to that position.
+ */
+const LONG_PRESS_MS = 450;
+const TOUCH_SLOP_PX = 10;
 
 /** ?oia=0 hides the status line under the screen (default: shown, 3270 style). */
 const SHOW_OIA = new URLSearchParams(location.search).get('oia') !== '0';
@@ -191,6 +206,18 @@ export class TermView {
   /** An Enter that carried a modified non-display field: watch the host's answer (PW_RESEND). */
   private pw: { attr: number; records: number; timer?: number; resent: boolean } | null = null;
   readonly kbdlog: KbdEvent[] = [];
+  /** the selection (cells), anchor where the drag began; null: none */
+  private sel: { anchor: CellAddr; focus: CellAddr } | null = null;
+  /** the pointer that is down on the screen: a mouse drag selects at once, a touch after a long press */
+  private drag: { id: number; touch: boolean; x: number; y: number; cell: CellAddr; timer: number; selecting: boolean } | null = null;
+  /** the last pointer gesture selected (or began to): main.ts then does not open the soft keyboard */
+  lastPointerSelected = false;
+  /** the text last put on the clipboard (tests) */
+  lastCopy = '';
+  readonly copyBtn: HTMLButtonElement;
+  private blinkOn = true;
+  private blinkTimer = 0;
+  private readonly reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
   private log(ev: string, d?: string): void {
     this.kbdlog.push({ t: Math.round(performance.now()), ev, kb: this.session.oia.keyboard, ...(d !== undefined ? { d } : {}) });
     if (this.kbdlog.length > KBDLOG_MAX) this.kbdlog.splice(0, this.kbdlog.length - KBDLOG_MAX);
@@ -209,7 +236,182 @@ export class TermView {
     this.session.on('disconnect', () => { this.holdEnd(''); if (this.ahead.length) { this.kbd.flushed += this.ahead.length; this.ahead = []; } this.changed(); });
     this.hookRecords();
     new ResizeObserver(() => this.paint()).observe(host);
+    this.copyBtn = document.createElement('button');
+    this.copyBtn.className = 'term-copy';
+    this.copyBtn.type = 'button';
+    this.copyBtn.textContent = 'Copy';
+    this.copyBtn.title = 'Copy the selected text (Ctrl+C)';
+    this.copyBtn.hidden = true;
+    this.copyBtn.addEventListener('pointerdown', (e) => e.preventDefault());   // keep the focus (and soft keyboard) where it is
+    this.copyBtn.addEventListener('click', () => { void this.copySelection(); });
+    host.appendChild(this.copyBtn);
+    this.wirePointer();
+    this.reducedMotion.addEventListener?.('change', () => { this.startBlink(); this.paint(); });
+    this.startBlink();
   }
+
+  // ------------------------------------------------------------ selection
+  /** The cell under a viewport point; clamp: the nearest screen cell (a drag that runs off the screen). */
+  private cellAt(clientX: number, clientY: number, clamp: boolean): CellAddr | null {
+    const list = this.last;
+    if (!list) return null;
+    const r = this.canvas.getBoundingClientRect();
+    if (!r.width || !r.height) return null;
+    const g = this.atlas.geometry;
+    const cols = Math.floor(list.width / g.cellWidth), rows = Math.floor((list.oia?.y ?? list.height) / g.cellHeight);
+    let col = Math.floor(((clientX - r.left) / r.width) * list.width / g.cellWidth);
+    let row = Math.floor(((clientY - r.top) / r.height) * list.height / g.cellHeight);
+    if (clamp) { col = Math.min(cols - 1, Math.max(0, col)); row = Math.min(rows - 1, Math.max(0, row)); }
+    else if (col < 0 || row < 0 || col >= cols || row >= rows) return null;
+    return { row, col };
+  }
+
+  /** The viewport point at the middle of a cell (tests). */
+  cellCenter(row: number, col: number): { x: number; y: number } | null {
+    const list = this.last;
+    if (!list) return null;
+    const r = this.canvas.getBoundingClientRect(), g = this.atlas.geometry;
+    return { x: r.left + ((col + 0.5) * g.cellWidth / list.width) * r.width, y: r.top + ((row + 0.5) * g.cellHeight / list.height) * r.height };
+  }
+
+  private selRect(): CellRect | null {
+    if (!this.sel) return null;
+    const rect = normalizeRect(this.sel.anchor, this.sel.focus);
+    return isEmptyRect(rect) ? null : rect;
+  }
+
+  hasSelection(): boolean { return this.selRect() !== null; }
+
+  /** The selected text, rows joined by newlines, trailing blanks trimmed, hidden fields (passwords) as blanks. */
+  selectionText(): string {
+    const rect = this.selRect();
+    if (!rect) return '';
+    const snap = this.session.screen.snapshot();
+    return extractText(resolve(snap), snap.cols, rect);
+  }
+
+  clearSelection(): void {
+    if (!this.sel) return;
+    this.sel = null;
+    this.copyBtn.hidden = true;
+    this.paint();
+  }
+
+  private setSelection(anchor: CellAddr, focus: CellAddr): void {
+    this.sel = { anchor, focus };
+    this.copyBtn.hidden = !this.hasSelection();
+    this.copyBtn.textContent = 'Copy';
+    this.paint();
+  }
+
+  /** Put the selection on the clipboard (Async Clipboard API, else a copy command on a scratch text box). */
+  async copySelection(): Promise<boolean> {
+    const text = this.selectionText();
+    if (!text) return false;
+    let ok = false;
+    try { await navigator.clipboard.writeText(text); ok = true; } catch { /* not allowed here: the fallback */ }
+    if (!ok) {
+      const ta = document.createElement('textarea');
+      ta.value = text; ta.setAttribute('readonly', ''); ta.style.position = 'fixed'; ta.style.opacity = '0';
+      const had = document.activeElement as HTMLElement | null;
+      document.body.appendChild(ta); ta.select();
+      try { ok = document.execCommand('copy'); } catch { ok = false; }
+      ta.remove(); had?.focus?.({ preventScroll: true });
+    }
+    this.lastCopy = ok ? text : this.lastCopy;
+    this.log('copy', `${ok ? 'ok' : 'failed'} ${text.length} chars`);
+    this.copyBtn.textContent = ok ? 'Copied' : 'Copy failed';
+    window.setTimeout(() => { this.copyBtn.textContent = 'Copy'; }, 1500);
+    return ok;
+  }
+
+  /** A click or tap without a drag: the cursor goes there (local, like the arrow keys; not while the host holds the keyboard). */
+  private clickAt(cell: CellAddr): void {
+    if (!this.session.isConnected() || this.hostLocked() || this.ahead.length) return;
+    const cols = this.session.screen.snapshot().cols;
+    this.session.keyboard.moveCursor(cell.row * cols + cell.col);
+    this.startBlink();
+    this.changed();
+  }
+
+  private wirePointer(): void {
+    const c = this.canvas;
+    c.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0) return;
+      if (this.drag) { window.clearTimeout(this.drag.timer); this.drag = null; }   // a pointer whose end we missed
+      const cell = this.cellAt(e.clientX, e.clientY, false);
+      this.log('pointer', `down ${e.pointerType} ${cell ? `${cell.row},${cell.col}` : 'off'}`);
+      if (!cell) return;
+      const touch = e.pointerType !== 'mouse';
+      this.lastPointerSelected = false;
+      const d = { id: e.pointerId, touch, x: e.clientX, y: e.clientY, cell, timer: 0, selecting: !touch };
+      this.drag = d;
+      if (touch) {
+        d.timer = window.setTimeout(() => {
+          if (this.drag !== d) return;
+          d.selecting = true; this.lastPointerSelected = true;
+          try { c.setPointerCapture(d.id); } catch { /* gone */ }
+          (navigator as Navigator & { vibrate?: (ms: number) => boolean }).vibrate?.(10);
+          this.setSelection(cell, cell);
+        }, LONG_PRESS_MS);
+      } else {
+        this.clearSelection();   // a new drag (or a click) starts over
+        try { c.setPointerCapture(e.pointerId); } catch { /* gone */ }
+      }
+    });
+    c.addEventListener('pointermove', (e) => {
+      const d = this.drag;
+      if (!d || d.id !== e.pointerId) return;
+      if (!d.selecting) {
+        if (Math.hypot(e.clientX - d.x, e.clientY - d.y) > TOUCH_SLOP_PX) { window.clearTimeout(d.timer); this.drag = null; }   // a scroll
+        return;
+      }
+      const cell = this.cellAt(e.clientX, e.clientY, true);
+      if (!cell) return;
+      const anchor = this.sel?.anchor ?? d.cell;
+      if (this.sel && this.sel.focus.row === cell.row && this.sel.focus.col === cell.col) return;
+      if (!this.sel && cell.row === d.cell.row && cell.col === d.cell.col) return;
+      this.lastPointerSelected = true;
+      this.setSelection(anchor, cell);
+    });
+    const end = (e: PointerEvent, cancel: boolean): void => {
+      const d = this.drag;
+      this.log('pointer', `${cancel ? 'cancel' : 'up'} ${d ? (d.selecting ? 'selecting' : 'click') : 'none'}`);
+      if (!d || d.id !== e.pointerId) return;
+      this.drag = null;
+      window.clearTimeout(d.timer);
+      if (cancel) return;
+      if (d.selecting && this.hasSelection()) { this.lastPointerSelected = true; return; }   // keep it for Copy
+      if (d.selecting && d.touch) { this.clearSelection(); return; }                         // a long press without a drag
+      this.clearSelection();
+      this.clickAt(d.cell);
+    };
+    c.addEventListener('pointerup', (e) => end(e, false));
+    c.addEventListener('pointercancel', (e) => end(e, true));
+    // a touch drag that selects must not scroll the page or open the long-press menu
+    c.addEventListener('touchmove', (e) => { if (this.drag?.selecting) e.preventDefault(); }, { passive: false });
+    c.addEventListener('contextmenu', (e) => { if (this.drag || this.sel) e.preventDefault(); });
+  }
+
+  // ------------------------------------------------------------ cursor blink
+  blinking(): boolean { return BLINK && !this.reducedMotion.matches; }
+
+  /** A new 'on' phase (solid while typing), then the blink, if enabled. */
+  private startBlink(): void {
+    window.clearInterval(this.blinkTimer);
+    const wasOff = !this.blinkOn;
+    this.blinkOn = true;
+    if (wasOff) this.paint();
+    if (!this.blinking()) return;
+    this.blinkTimer = window.setInterval(() => {
+      if (document.hidden || !this.host.isConnected || this.host.offsetParent === null) return;   // not shown: no repaints
+      this.blinkOn = !this.blinkOn;
+      this.paint();
+    }, BLINK_MS);
+  }
+
+  /** Blink state (tests). */
+  blink_(): { enabled: boolean; on: boolean; ms: number } { return { enabled: this.blinking(), on: this.blinkOn, ms: BLINK_MS }; }
 
   async connect(): Promise<void> {
     // host/port are informational: the injected connect() ignores them.
@@ -393,12 +595,23 @@ export class TermView {
       atlas: this.atlas.geometry, scale, offsetX: 0, offsetY: 0, blank: this.atlas.blank,
       tinted: (color: Rgb): unknown | undefined => tintOf(this.atlas, color, this.repaintSoon),
     };
-    blit(ctx, list, opts);
+    blit(ctx, this.blinkOn ? list : { ...list, cells: list.cells.map((c) => (c.cursor ? { ...c, cursor: false } : c)) }, opts);
     if (list.oia) {
       blit(ctx, { cells: list.oia.cells, width: list.width, height: list.height }, opts);
       // separator line between the screen and the OIA (one font pixel, at the top of the OIA row)
       ctx.fillStyle = rgbCss(schemeRgb(this.scheme, Color.BLUE));
       ctx.fillRect(0, list.oia.y * scale, W, scale);
+    }
+    // the selection: inverse video over the cells (difference: works with every color scheme), as upstream renderer.ts
+    const rect = this.selRect();
+    if (rect) {
+      const g = this.atlas.geometry;
+      ctx.save();
+      ctx.globalCompositeOperation = 'difference';
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(rect.left * g.cellWidth * scale, rect.top * g.cellHeight * scale,
+        (rect.right - rect.left + 1) * g.cellWidth * scale, (rect.bottom - rect.top + 1) * g.cellHeight * scale);
+      ctx.restore();
     }
   }
 
@@ -406,7 +619,10 @@ export class TermView {
   oiaText(): string { return this.last?.oia?.text ?? ''; }
 
   action(a: Action): void {
-    if (a.kind === 'quit' || a.kind === 'toggleKeypad' || a.kind === 'transferForm' || a.kind === 'copy') return;
+    if (a.kind === 'copy') { this.setSelection({ row: a.rect.top, col: a.rect.left }, { row: a.rect.bottom, col: a.rect.right }); void this.copySelection(); return; }
+    if (a.kind === 'quit' || a.kind === 'toggleKeypad' || a.kind === 'transferForm') return;
+    this.clearSelection();   // a key ends the selection (x3270, upstream renderer.ts)
+    this.startBlink();       // solid while typing
     if (this.pw?.timer) { window.clearTimeout(this.pw.timer); this.pw = null; this.log('pw-resend-cancelled', a.kind); }
     if (a.kind === 'reset') {          // x3270: Reset also drops the typeahead
       this.holdEnd('reset');

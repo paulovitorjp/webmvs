@@ -193,8 +193,9 @@ function newView(t: Tab, ttype: string): TermView {
   // it is cancelled. Mouse: focus on pointerdown. Touch/pen: focus on pointerup (the end of the tap).
   v.canvas.addEventListener('mousedown', (e) => e.preventDefault());
   v.canvas.addEventListener('pointerdown', (e) => { if (e.pointerType === 'mouse') focusTerminal(true); });
-  v.canvas.addEventListener('pointerup', (e) => { if (e.pointerType !== 'mouse') focusTerminal(true); });
-  v.canvas.addEventListener('click', () => { if (document.activeElement !== capture()) focusTerminal(true); });
+  // (not after a touch selection: the soft keyboard would cover it)
+  v.canvas.addEventListener('pointerup', (e) => { if (e.pointerType !== 'mouse' && !v.lastPointerSelected) focusTerminal(true); });
+  v.canvas.addEventListener('click', () => { if (document.activeElement !== capture() && !v.lastPointerSelected) focusTerminal(true); });
   v.session.on('disconnect', () => dlog(`[${t.id}] disconnected`));
   v.session.on('connect', () => dlog(`[${t.id}] connected as ${ttype}`));
   return v;
@@ -236,10 +237,26 @@ function act(a: Action): void {
 document.addEventListener('keydown', (e) => {
   const tgt = e.target as HTMLElement;
   if (tgt.closest('#debug, dialog, input:not(#kbd-capture)')) return;
+  // Ctrl+C / Cmd+C with a selection on the screen: copy it (without one the key does what the browser does)
+  if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === 'c') {
+    const v = tabs.get(active)?.view;
+    if (v?.hasSelection()) { e.preventDefault(); void v.copySelection(); }
+    return;
+  }
   const a = actionForKey(e);
   if (!a) return;
   e.preventDefault();
   act(a);
+});
+// Copy from the browser menu (Edit > Copy) with a selection on the screen
+document.addEventListener('copy', (e) => {
+  const tgt = e.target as HTMLElement | null;
+  if (tgt?.closest?.('#debug, dialog, input:not(#kbd-capture)')) return;
+  const v = tabs.get(active)?.view, text = v?.selectionText();
+  if (!v || !text || !e.clipboardData) return;
+  e.clipboardData.setData('text/plain', text);
+  e.preventDefault();
+  v.lastCopy = text;
 });
 // Soft keyboards (Android: keydown key === 'Unidentified') deliver text through input events.
 // The capture box keeps one placeholder character so a soft-keyboard backspace on an "empty" box still
@@ -988,6 +1005,10 @@ Object.assign(window, {
       });
       return { cursor: sc.cursor, fields: out };
     },
+    /** selection and cursor blink (tests): the viewport point of a cell, the selection, the last copied text */
+    cellCenter: (id: string, row: number, col: number) => tabs.get(id)?.view?.cellCenter(row, col) ?? null,
+    selection: (id: string) => { const v = tabs.get(id)?.view; return v ? { text: v.selectionText(), copyButton: !v.copyBtn.hidden, lastCopy: v.lastCopy } : null; },
+    blink: (id: string) => tabs.get(id)?.view?.blink_() ?? null,
     addTso: async (): Promise<string> => { const t = addTso(); select(t.id); await connectTso(t); return t.id; },
     /** snapshot state (runtime stats + what the page did), a checkpoint now, the console history. */
     snapshot: () => ({ page: { ...snapInfo }, rt: machine.snapshot?.stats() ?? null }),

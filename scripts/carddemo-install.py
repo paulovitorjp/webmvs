@@ -75,7 +75,7 @@ def app_file(src, kind, name):
         if os.path.exists(f): return f
     return os.path.join(src, 'app', kind, name + '.' + kind)
 OTHER_TRANS = []
-BATCH = ['CBACT02C', 'CBACT03C', 'CBCUS01C', 'CBTRN03C']
+BATCH = ['CBACT02C', 'CBACT03C', 'CBCUS01C', 'CBTRN03C', 'CBACT04C']
 # batch programs of this port (scripts/carddemo/helpers): CDTRFLT selects transactions by date for the report job
 TOOLS = ['CDTRFLT', 'CDUNHEX']
 READALL = """//READALL  JOB (1),'CARDDEMO',CLASS=A,MSGCLASS=A,MSGLEVEL=(1,1)
@@ -92,6 +92,38 @@ READALL = """//READALL  JOB (1),'CARDDEMO',CLASS=A,MSGCLASS=A,MSGLEVEL=(1,1)
 //STEPLIB  DD DSN=CARDDEMO.LOADLIB,DISP=SHR
 //CUSTFILE DD DSN=CARDDEMO.CUSTDATA.KSDS,DISP=SHR
 //SYSOUT   DD SYSOUT=*
+"""
+# the interest calculation job (upstream INTCALC, without the generation data group): CBACT04C adds the month's
+# interest to the account balances and writes the interest transactions to CARDDEMO.SYSTRAN. It reads the card
+# cross-reference by account number (an alternate key upstream); the ISAM interface of this COBOL cannot use an
+# alternate index path, so the job first copies the cross-reference into a KSDS keyed by account number
+INTCALC = """//INTCALC  JOB (1),'CARDDEMO',CLASS=A,MSGCLASS=A,MSGLEVEL=(1,1)
+//* CardDemo interest calculation (CBACT04C), PARM: the processing date
+//DELETE  EXEC PGM=IEFBR14
+//OLD      DD DSN=CARDDEMO.SYSTRAN,DISP=(MOD,DELETE),
+//            UNIT=SYSDA,SPACE=(TRK,1)
+//XREF    EXEC PGM=IDCAMS
+//SYSPRINT DD SYSOUT=*
+//SYSIN    DD *
+ DELETE CARDDEMO.XREFACCT.KSDS CLUSTER
+ SET MAXCC = 0
+ DEFINE CLUSTER (NAME(CARDDEMO.XREFACCT.KSDS) VOLUMES(CARDD0) -
+        TRACKS(2 2) KEYS(11 25) RECORDSIZE(50 50) INDEXED) -
+   DATA (NAME(CARDDEMO.XREFACCT.KSDS.DATA)) -
+   INDEX (NAME(CARDDEMO.XREFACCT.KSDS.INDEX))
+ REPRO INDATASET(CARDDEMO.CARDXREF.PATH) -
+       OUTDATASET(CARDDEMO.XREFACCT.KSDS)
+/*
+//INTCALC EXEC PGM=CBACT04C,PARM='2022071800',COND=(4,LT)
+//STEPLIB  DD DSN=CARDDEMO.LOADLIB,DISP=SHR
+//SYSOUT   DD SYSOUT=*
+//TCATBALF DD DSN=CARDDEMO.TCATBALF.KSDS,DISP=SHR
+//XREFFILE DD DSN=CARDDEMO.XREFACCT.KSDS,DISP=SHR
+//ACCTFILE DD DSN=CARDDEMO.ACCTDATA.KSDS,DISP=SHR
+//DISCGRP  DD DSN=CARDDEMO.DISCGRP.KSDS,DISP=SHR
+//TRANSACT DD DSN=CARDDEMO.SYSTRAN,DISP=(NEW,CATLG,DELETE),
+//            UNIT=SYSDA,SPACE=(TRK,(15,15),RLSE),
+//            DCB=(RECFM=F,LRECL=350,BLKSIZE=350)
 """
 HELPERS = ['CDMOVC', 'CDSTRG', 'CDDATE', 'CDREPC', 'CDNUMV', 'CSUTLDTC', 'CDTLEN', 'CDIDAT', 'CDCLAS', 'CDLIKE']
 
@@ -382,6 +414,34 @@ def define(name, rl, kl, ko, nrec, aix=None):
     return ctl
 
 
+def zoned(s):
+    """the value of a signed zoned decimal field (sign overpunched on the last digit), in units of its last digit"""
+    c = s[-1]
+    if c in '{ABCDEFGHI': return int(s[:-1] + str('{ABCDEFGHI'.index(c)))
+    if c in '}JKLMNOPQR': return -int(s[:-1] + str('}JKLMNOPQR'.index(c)))
+    return int(s)
+
+
+def unzoned(v, n):
+    d = str(abs(v)).rjust(n, '0')
+    return d[:-1] + ('{ABCDEFGHI' if v >= 0 else '}JKLMNOPQR')[int(d[-1])]
+
+
+def tcatbal(src, recs):
+    """the transaction category balances as posting the sample transactions (POSTTRAN) would leave them: per account,
+    type and category the sum of the amounts (the upstream sample has every balance zero, so the interest job would
+    compute no interest)"""
+    acct = {r[:16]: r[25:36] for r in data_lines(src, 'CARDXREF', 50)}
+    sums = {}
+    for r in data_lines(src, 'DALYTRAN', 350):
+        k = acct.get(r[262:278])
+        if k: sums[k + r[16:18] + r[18:22]] = sums.get(k + r[16:18] + r[18:22], 0) + zoned(r[132:143])
+    out = {r[:17]: r for r in recs}
+    for k, v in sums.items():
+        out[k] = k + unzoned(v, 11) + out.get(k, '0' * 50)[28:]
+    return [out[k] for k in sorted(out)]
+
+
 def job_data(src):
     jobs = []
     for name, rl, kl, ko, f, aix in FILES:
@@ -389,6 +449,8 @@ def job_data(src):
         recs = data_lines(src, f, rl)
         if name == 'TRANSACT':   # posted transactions: processing time = origin time (the sample has it blank)
             recs = [r[:304] + r[278:304] + r[330:] if not r[304:330].strip() else r for r in recs]
+        if name == 'TCATBALF':   # category balances: the sample's are all zero; here, the sums of the transactions
+            recs = tcatbal(src, recs)
         n = (rl + 79) // 80
         j = JOBCARD.format(name='CDL' + name[:5]) + f"""//DEFINE  EXEC PGM=IDCAMS
 //SYSPRINT DD SYSOUT=*
@@ -764,6 +826,7 @@ def main():
         cl = [l.replace('TCP(2$)', 'TCP(1$)') for l in cl]
         jobs.append((gener('CDCLIST', 'SYS1.CMDPROC(CARDDEMO)', cl), None))
         jobs.append((gener('CDJCL', 'CARDDEMO.JCL(READALL)', READALL.splitlines()), None))
+        jobs.append((gener('CDJCL2', 'CARDDEMO.JCL(INTCALC)', INTCALC.splitlines()), None))
     if 'rakf' in stages:
         prof = ki.rakf_add(ki.member(os.path.join(ex, 'SECURE'), 'PROFILES'), ['CARDDEMO.*', 'UCCARDD0'])
         # ALTER: the transaction report job, which KICKS submits without a user (RAKF's default PROD account),
