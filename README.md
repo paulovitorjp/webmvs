@@ -83,8 +83,10 @@ What works (the original programs, converted):
 | sign-on | | COSGN00C | users from the USRSEC file |
 | main menu | | COMEN01C | |
 | main menu | 1 Account View | COACTVWC | account, customer and card data (try account `00000000001`) |
+| main menu | 2 Account Update | COACTUPC | account number, Enter, change the fields, Enter checks them, PF5 saves |
 | main menu | 3 Credit Card List | COCRDLIC | PF7/PF8 page |
 | main menu | 4 Credit Card View | COCRDSLC | account and card number (e.g. `00000000001`, `9680294154603697`) |
+| main menu | 5 Credit Card Update | COCRDUPC | account and card number, change name, status or expiry, Enter, PF5 saves |
 | main menu | 6 Transaction List | COTRN00C | PF7/PF8 page |
 | main menu | 7 Transaction View | COTRN01C | transaction id (e.g. `0000000000683580`) |
 | main menu | 8 Transaction Add | COTRN02C | account or card number, the transaction fields, `Y` to confirm |
@@ -95,12 +97,17 @@ What works (the original programs, converted):
 | admin menu | 3 User Update | COUSR02C | user id, Enter, change the fields, PF5 saves |
 | admin menu | 4 User Delete | COUSR03C | user id, Enter, PF5 deletes |
 
-In the card and transaction lists, `S` on a line shows that card or transaction.
+In the card and transaction lists, `S` on a line shows that card or transaction (`U` in the card list updates it).
+
+The update screens keep the original checks. Some sample records do not pass them as shipped (for account
+`00000000001`: FICO score 274 is below 300, phone 2 area code 373 is not a US general-purpose code, and zip
+12546 does not match state NC), so fix those fields too before PF5 saves. KICKS changes what you type to
+capital letters, so names and addresses saved from these screens are stored in capitals.
 
 Batch: the file readers CBACT02C, CBACT03C and CBCUS01C are in `CARDDEMO.LOADLIB`; the job
 `CARDDEMO.JCL(READALL)` runs them (`SUBMIT 'CARDDEMO.JCL(READALL)'` at `READY`).
 
-Not in this version: account update, card update (`U` in the card list), reports, pending authorizations
+Not in this version: reports, pending authorizations
 (IMS, MQ), transaction type maintenance (Db2) and the other batch jobs (they need SORT,
 Db2 or language features this COBOL does not have). Their menu options answer
 "... is not available in this version". The data files are read and written by the programs that work; your

@@ -75,8 +75,8 @@ carddemo)   # CardDemo on CARDD0 (0352), on the KICKS volumes: $B/carddemo/out
   grep -q '^0351 ' "$C/MVSCE/conf/local.cnf" || { echo "no 0351 line in local.cnf"; exit 1; }
   python3 "$REPO/scripts/carddemo-install.py" --mvsce "$C/MVSCE" --src "$C/src" --out "$CV" --herc "$HERC" --base "$KV" > "$L/carddemo.log" 2>&1
   rc=$?; grep -v '^HHC' "$L/carddemo.log"
-  # KICKS0 ships from the KICKS install: the CardDemo install must not change it
-  [ $rc = 0 ] && { cmp -s "$KV/kicks0.3350" "$C/MVSCE/DASD/kicks0.3350" || { echo "the install changed kicks0.3350"; rc=1; }; }
+  # KICKS0 ships from the KICKS install: the CardDemo install must not change it (apart from last-reference dates)
+  [ $rc = 0 ] && { python3 "$REPO/scripts/ckd-same.py" --herc "$HERC" "$KV/kicks0.3350" "$C/MVSCE/DASD/kicks0.3350" || { echo "the install changed kicks0.3350"; rc=1; }; }
   [ $rc = 0 ] && rm -rf "$C/MVSCE" "$C/src"; echo "carddemo rc=$rc"; exit $rc ;;
 indfile)   # IND$FILE 2.0.5 (3270 file transfer) from the release's MVP package into SYS2.CMDLIB: $B/indfile/out
   [ -f "$CV/cardd0.3350" ] || { echo "no $CV/cardd0.3350: run scripts/build.sh carddemo first"; exit 1; }

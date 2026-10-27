@@ -4,7 +4,7 @@ tuples; old must match exactly n times (default 1) in the program after COPY mem
 
 # programs of this port (online menu options that run); the other menu options say "not available in this version"
 PORTED = {'COACTVWC', 'COCRDLIC', 'COCRDSLC', 'COTRN00C', 'COTRN01C', 'COUSR00C', 'COUSR01C', 'COUSR02C', 'COUSR03C',
-          'COTRN02C', 'COBIL00C'}
+          'COTRN02C', 'COBIL00C', 'COACTUPC', 'COCRDUPC'}
 NOT_AVAILABLE = 'is not available in this version'
 
 ABEND = ("CALL 'CEE3ABD' USING ABCODE, TIMING.", "STOP RUN.")
@@ -33,6 +33,9 @@ FIXES = {
                   "TIME(WS-CUR-TIME-X08) TIMESEP(':') END-EXEC",
                   "EXEC CICS FORMATTIME ABSTIME(WS-ABS-TIME) YYYYMMDD(WS-CUR-DATE-X10) DATESEP('-') END-EXEC "
                   "EXEC CICS FORMATTIME ABSTIME(WS-ABS-TIME) TIME(WS-CUR-TIME-X08) TIMESEP(':') END-EXEC")],
+    # two items named WS-EDIT-DATE-X (the second redefines the first): the second gets its own name
+    'COACTUPC': [('10 WS-EDIT-DATE-X REDEFINES WS-EDIT-DATE-X PIC 9(10).',
+                  '10 WS-EDIT-DATE-X9 REDEFINES WS-EDIT-DATE-X PIC 9(10).')],
     'COSGN00C': [("MOVE CCDA-MSG-INVALID-KEY TO WS-MESSAGE PERFORM SEND-SIGNON-SCREEN",
                   "MOVE -1 TO USERIDL OF COSGN0AI MOVE 'N' TO WS-ERR-FLG IF " + ' OR '.join(
                       f'EIBAID = {k}' for k in ['DFHCLEAR', 'DFHPA1', 'DFHPA3']

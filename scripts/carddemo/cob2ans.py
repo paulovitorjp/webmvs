@@ -38,8 +38,14 @@ def read_lines(path):
         if ind in '*/': continue
         if ind == '-': raise CvtError('continuation line not supported: ' + raw)
         if ind == 'D': continue
-        out.append(txt)
+        out.append(upper_code(txt))
     return out
+
+
+def upper_code(txt):
+    """words in upper case (the compiler takes no lower case), literals as they are"""
+    parts = re.split(r'("[^"]*"?|\'[^\']*\'?)', txt)
+    return ''.join(x if x[:1] in ('"', "'") else x.upper() for x in parts)
 
 
 MAPDIRS = []
@@ -93,12 +99,12 @@ def expand_copies(lines, cpydirs, keep, depth=0):
 
 
 # ---------------------------------------------------------------- tokens
-TOK = re.compile(r"""\s*(?:('(?:[^']|'')*')|("(?:[^"]|"")*")|(==)|(\.)(?=\s|$)|([(),:])|(>=|<=|[<>=+*/])|([A-Z0-9][A-Z0-9-]*(?:\.[0-9]+)?|-?[0-9]+(?:\.[0-9]+)?|[A-Z0-9-]+))""", re.I)
+TOK = re.compile(r"""\s*(?:('(?:[^']|'')*')|("(?:[^"]|"")*")|(==)|(\.)(?=\s|$)|([(),:])|(>=|<=|[<>=+*/])|([A-Z0-9][A-Z0-9-]*(?:\.[0-9A-Z]+)?|-?[0-9]+(?:\.[0-9]+)?|[A-Z0-9-]+))""", re.I)
 
 
 class T(str):
     """a token; .a = starts in area A (column 8-11), .line = source line number"""
-    a = False; line = 0
+    a = False; line = 0; col = 0; end = 0
 
 
 def tokenize(lines, start=0):
@@ -115,7 +121,7 @@ def tokenize(lines, start=0):
             t = T(g if g.startswith(("'", '"')) else g.upper())
             if t.startswith('"'):
                 t = T("'" + t[1:-1].replace('""', '"').replace("'", "''") + "'")
-            t.a = col < 4; t.line = start + n
+            t.a = col < 4; t.line = start + n; t.col = col; t.end = m.end()
             toks.append(t); pos = m.end()
     return toks
 
@@ -152,6 +158,12 @@ class Item:
         if self.children or self.pic is None: return False
         p = expand_pic(self.pic)
         return set(p) <= set('S9VP')
+
+    def num_edited(self):
+        """numeric-edited (INITIALIZE moves ZERO to it)"""
+        if self.children or self.pic is None: return False
+        p = expand_pic(self.pic)
+        return not set(p) & set('XA') and bool(set(p) & set('9Z*'))
 
     def ancestors(self):
         a, p = [], self.parent
@@ -205,6 +217,9 @@ def parse_data(toks):
                     pic += '(' + s[j + 2] + ')'; j += 3
                     if j + 1 < len(s) and re.fullmatch(r'[A-Z0-9V]+', s[j + 1]) and s[j + 1] not in ('VALUE', 'VALUES', 'COMP', 'COMP-3', 'USAGE', 'OCCURS', 'REDEFINES', 'BINARY', 'SYNC', 'DISPLAY', 'COMPUTATIONAL', 'COMPUTATIONAL-3', 'PACKED-DECIMAL', 'JUST', 'JUSTIFIED', 'BLANK', 'SIGN', 'INDEXED', 'TIMES'):
                         j += 1; pic += s[j]
+                # an edited picture is split by the tokenizer (+ZZZ,ZZZ.99): join the tokens that touch
+                while j + 1 < len(s) and s[j + 1].line == s[j].line and s[j + 1].col == s[j].end and s[j].end > 0:
+                    j += 1; pic += s[j]
                 it.pic = pic
             elif w in ('COMP', 'COMPUTATIONAL', 'BINARY', 'COMP-4', 'COMP-3', 'COMPUTATIONAL-3', 'PACKED-DECIMAL', 'COMP-1', 'COMP-2', 'INDEX', 'POINTER'):
                 it.usage = w
@@ -349,7 +364,7 @@ class Parser:
             args = []
             while True:
                 x = self.peek()
-                if x is None or x == '.' or (x in VERBS and x != 'STRING') or (x in TERMS and x != 'END-STRING'): break
+                if x is None or x == '.' or (x in VERBS and (x != 'STRING' or args)) or (x in TERMS and x != 'END-STRING'): break
                 if x == 'END-STRING': self.take(); break
                 args.append(self.take())
             return St('string', args=args)
@@ -371,7 +386,7 @@ class Gen:
         self.n = 0
         self.ws = []            # extra WORKING-STORAGE lines
         self.lit = {}
-        self.tmp = 0
+        self.tmp = 0; self.tmpsize = {}
         self.warn = []
 
     def newpara(self, sentences):
@@ -434,7 +449,23 @@ class Gen:
         self.tmp += 1
         nm = f'CDT-{self.tmp:03d}'
         self.ws.append(f'       01  {nm} PIC {pic}.')
+        m = re.fullmatch(r'X\((\d+)\)', pic)
+        if m: self.tmpsize[nm] = int(m.group(1))
         return nm
+
+    def xsize(self, toks):
+        """size of an alphanumeric operand (after fix_expr): a data item, a temp or a literal"""
+        if len(toks) == 1 and toks[0] in self.tmpsize: return self.tmpsize[toks[0]]
+        if len(toks) == 1 and toks[0][:1] in ('"', "'"): return len(toks[0]) - 2
+        j, r = self.ref(toks, 0)
+        return self.size_of(r['name'], r['quals'])
+
+    @staticmethod
+    def unwrap_trim(arg):
+        """FUNCTION TRIM(x [LEADING|TRAILING]) -> (x, True); anything else -> (arg, False)"""
+        if arg[:3] == ['FUNCTION', 'TRIM', '('] and arg[-1] == ')':
+            return [x for x in arg[3:-1] if x not in ('TRAILING', 'LEADING')], True
+        return arg, False
 
     def text(self, r):
         s = r['name']
@@ -513,7 +544,7 @@ class Gen:
             tmp = self.newtmp('X(21)')
             pre.append(f"CALL 'CDDATE' USING {tmp}")
             return k + 2, tmp
-        if fn in ('UPPER-CASE', 'LOWER-CASE', 'TRIM', 'NUMVAL', 'NUMVAL-C', 'LENGTH', 'INTEGER-OF-DATE', 'DATE-OF-INTEGER', 'TEST-NUMVAL-C'):
+        if fn in ('UPPER-CASE', 'LOWER-CASE', 'TRIM', 'NUMVAL', 'NUMVAL-C', 'LENGTH', 'INTEGER-OF-DATE', 'DATE-OF-INTEGER', 'TEST-NUMVAL-C', 'TEST-NUMVAL', 'MOD'):
             assert toks[k + 2] == '('
             depth, e = 0, k + 2
             while True:
@@ -524,9 +555,12 @@ class Gen:
                 e += 1
             arg = toks[k + 3:e]
             if fn in ('UPPER-CASE', 'LOWER-CASE'):
+                arg, _ = self.unwrap_trim(arg)   # comparisons pad with spaces: TRIM only drops leading spaces
                 argx = self.fix_expr(arg, pre)
-                j, r = self.ref(arg, 0)
-                size = self.size_of(r['name'], r['quals']) if not r['rm'] else None
+                if arg[0] == 'FUNCTION': size = self.xsize(argx)
+                else:
+                    j, r = self.ref(arg, 0)
+                    size = self.size_of(r['name'], r['quals']) if not r['rm'] else None
                 if size is None:
                     it = None; size = 80
                 tmp = self.newtmp(f'X({size})')
@@ -535,6 +569,12 @@ class Gen:
                 pre.append(f"TRANSFORM {tmp} FROM '{a}' TO '{b}'")
                 return e + 1, tmp
             if fn == 'LENGTH':
+                inner, trimmed = self.unwrap_trim(arg)
+                if trimmed:   # the length without leading and trailing spaces, 0 for all spaces
+                    argx = self.fix_expr(inner, pre)
+                    res = self.newtmp('S9(8) COMP')
+                    pre.append(f"CALL 'CDTLEN' USING {' '.join(argx)} {self.const_num(self.xsize(argx))} {res}")
+                    return e + 1, res
                 j, r = self.ref(arg, 0)
                 return e + 1, str(self.size_of(r['name'], r['quals']))
             if fn == 'TRIM':
@@ -549,7 +589,21 @@ class Gen:
                 pre.append(f'MOVE {" ".join(argx)} TO {src}')
                 pre.append(f"CALL 'CDNUMV' USING {src} {tmp}")
                 return e + 1, tmp
-            if fn == 'TEST-NUMVAL-C':
+            if fn == 'MOD':   # MOD(a, b) for non-negative integers: a - (a / b) * b
+                comma = arg.index(',') if ',' in arg else None
+                if comma is None: raise CvtError('FUNCTION MOD without a comma')
+                a, b = self.fix_expr(arg[:comma], pre), self.fix_expr(arg[comma + 1:], pre)
+                q = self.newtmp('S9(15) COMP-3'); res = self.newtmp('S9(15) COMP-3')
+                pre.append(f'COMPUTE {q} = ' + ' '.join(a) + ' / ' + ' '.join(b))
+                pre.append(f'COMPUTE {res} = ' + ' '.join(a) + f' - {q} * ' + ' '.join(b))
+                return e + 1, res
+            if fn in ('INTEGER-OF-DATE', 'DATE-OF-INTEGER'):   # helpers/CDIDAT.cbl
+                argx = self.fix_expr(arg, pre)
+                src = self.newtmp('S9(8) COMP'); res = self.newtmp('S9(8) COMP')
+                pre.append(f'COMPUTE {src} = ' + ' '.join(argx))
+                pre.append(f"CALL '{'CDIDAT' if fn == 'INTEGER-OF-DATE' else 'CDDOFI'}' USING {src} {res}")
+                return e + 1, res
+            if fn in ('TEST-NUMVAL-C', 'TEST-NUMVAL'):
                 argx = self.fix_expr(arg, pre)
                 tmp = self.newtmp('S9(8) COMP'); val = self.newtmp('S9(13)V99 COMP-3'); src = self.newtmp('X(40)')
                 pre.append(f'MOVE {" ".join(argx)} TO {src}')
@@ -571,7 +625,69 @@ class Gen:
         return 'PERFORM ' + self.newpara(sents)
 
     def cond(self, toks, pre):
-        return ' '.join(self.fix_expr(toks, pre))
+        return ' '.join(self.fix_expr(self.guard_zero(self.class_refmod(toks, pre)), pre))
+
+    CLASSES = {'NUMERIC': "'N'", 'ALPHABETIC': "'A'", 'SPACE': "'S'", 'SPACES': "'S'", 'LOW-VALUE': "'L'", 'LOW-VALUES': "'L'"}
+
+    def class_refmod(self, toks, pre):
+        """x(a:n) [IS] [NOT] NUMERIC|ALPHABETIC and x(a:n) [NOT] = SPACES|LOW-VALUES with a variable n: the temp of a
+        reference modification is space filled to the full size, so the test goes to helpers/CDCLAS.cbl instead"""
+        out, k = [], 0
+        while k < len(toks):
+            t = toks[k]
+            if re.fullmatch(r'[A-Z][A-Z0-9-]*', t) and t not in RESERVED and self.item(t) is not None:
+                j, r = self.ref(toks, k)
+                if r['rm'] and r['rm'][1] and not (len(r['rm'][1]) == 1 and re.fullmatch(r'\d+', r['rm'][1][0])):
+                    rest = toks[j:]; m = 0
+                    if rest[m:m + 1] == ['IS']: m += 1
+                    neg = rest[m:m + 1] == ['NOT']
+                    if neg: m += 1
+                    kind = None
+                    if rest[m:m + 1] and rest[m] in ('NUMERIC', 'ALPHABETIC'): kind = rest[m]; m += 1
+                    elif rest[m:m + 1] in (['='], ['EQUAL']):
+                        m2 = m + 1 + (rest[m + 1:m + 2] == ['TO'])
+                        if rest[m2:m2 + 1] and rest[m2] in ('SPACE', 'SPACES', 'LOW-VALUE', 'LOW-VALUES'):
+                            kind = rest[m2]; m = m2 + 1
+                    if kind:
+                        base, off, ln, _ = self.rm_parts(r, pre)
+                        flag = self.newtmp('X')
+                        lit, _ = self.const_lit(self.CLASSES[kind])
+                        pre.append(f"CALL 'CDCLAS' USING {self.text(base)} {off} {ln} {lit} {flag}")
+                        out += [flag] + (['NOT'] if neg else []) + ['=', "'Y'"]
+                        k = j + m; continue
+            out.append(t); k += 1
+        return out
+
+    ZEROS = ('0', 'ZERO', 'ZEROS', 'ZEROES')
+    RELOPS = ('=', '<', '>', '>=', '<=', 'EQUAL', 'THAN', 'TO', 'GREATER', 'LESS')
+
+    def guard_zero(self, toks):
+        """x = 0 on a DISPLAY numeric item -> (x NOT NUMERIC OR x = 0); x NOT = 0 -> (x NUMERIC AND x NOT = 0).
+        Enterprise COBOL compares spaces or low-values in a zoned field as zero; this compiler stops with a data
+        exception (S0C7). CardDemo tests fields that can hold spaces this way (CC-CARD-NUM-N = 0)."""
+        out, k = [], 0
+        while k < len(toks):
+            t = toks[k]
+            if (re.fullmatch(r'[A-Z][A-Z0-9-]*', t) and t not in RESERVED and (not out or out[-1] not in self.RELOPS)):
+                it = self.item(t)
+                if it is not None and it.numeric() and it.usage == 'DISPLAY':
+                    j, r = self.ref(toks, k)
+                    ref, rest = toks[k:j], toks[j:]
+                    if not r['rm']:
+                        neg = rest[:1] == ['NOT']
+                        r2 = rest[1:] if neg else rest
+                        if r2[:1] == ['IS']: r2 = r2[1:]
+                        n = 0
+                        if r2[:1] == ['='] and r2[1:2] and r2[1] in self.ZEROS: n = 2
+                        elif r2[:2] == ['EQUAL', 'TO'] and r2[2:3] and r2[2] in self.ZEROS: n = 3
+                        elif r2[:1] == ['EQUAL'] and r2[1:2] and r2[1] in self.ZEROS: n = 2
+                        if n:
+                            used = len(rest) - len(r2) + n
+                            if neg: out += ['('] + ref + ['NUMERIC', 'AND'] + ref + ['NOT', '=', '0', ')']
+                            else: out += ['('] + ref + ['NOT', 'NUMERIC', 'OR'] + ref + ['=', '0', ')']
+                            k = j + used; continue
+            out.append(t); k += 1
+        return out
 
     def gen(self, stmts):
         out = []
@@ -636,7 +752,9 @@ class Gen:
         if k == 'io':
             args = ' '.join(self.fix_expr(s.args, pre))
             br = s.br
-            st = getattr(self, 'files', {}).get(s.args[0], {}).get('status') if s.args else None
+            fi = getattr(self, 'files', {}).get(s.args[0], {}) if s.args else {}
+            st = fi.get('status')
+            if fi.get('nominal') and s.verb == 'READ': pre = pre + [f"MOVE {fi['rkey']} TO {fi['nominal']}"]
             if st and s.verb == 'READ' and not br:
                 return pre + [f"MOVE '00' TO {st}", f"READ {args} AT END MOVE '10' TO {st}"]
             if not br: return pre + [f'{s.verb} {args}']
@@ -712,6 +830,7 @@ class Gen:
     def string(self, args):
         """STRING a [DELIMITED BY SIZE|SPACE|lit] ... INTO t [WITH POINTER p]"""
         pre = []
+        args = [x for x in args if x != ',']   # separator commas
         if 'INTO' not in args: raise CvtError('STRING without INTO')
         i = args.index('INTO')
         srcs, rest = args[:i], args[i + 1:]
@@ -825,7 +944,7 @@ class Gen:
                         out.extend(self.init_table(leaf, path)); continue
                     q = ' OF '.join([leaf.name] + [p.name for p in reversed(path)][:1]) if path else leaf.name
                     q = leaf.name + (' OF ' + it.name if leaf is not it else '')
-                    out.append(f'MOVE {"ZERO" if leaf.numeric() or leaf.usage != "DISPLAY" else "SPACES"} TO {q}')
+                    out.append(f'MOVE {"ZERO" if leaf.numeric() or leaf.num_edited() or leaf.usage != "DISPLAY" else "SPACES"} TO {q}')
             return dedupe(out)
         if verb == 'MOVE':
             # MOVE src TO t1 t2 ... ; refmod on targets; FUNCTION CURRENT-DATE
@@ -850,7 +969,10 @@ class Gen:
                 j, r = self.ref(tg, k); k = j
                 if r['rm']:
                     base, off, ln, const = self.rm_parts(r, out)
-                    n = const or 256
+                    n = const
+                    if not n:   # the temp must hold the whole source (a group can exceed 256)
+                        try: n = max(256, self.xsize(sx) or 0)
+                        except Exception: n = 256
                     tmp = self.newtmp(f'X({n})')
                     out.append(f'MOVE {" ".join(sx)} TO {tmp}')
                     out.append(f"CALL 'CDMOVC' USING {tmp} {self.const_num(1)} {ln} {self.text(base)} {off} {ln}")
@@ -880,8 +1002,15 @@ class Gen:
     def inspect(self, args):
         j, r = self.ref(args, 0)
         tgt = self.text(r)
-        if r['rm']: raise CvtError('INSPECT of a reference modification')
         rest = args[j:]
+        if r['rm']:
+            # INSPECT x(a:b) CONVERTING: through a temp (CDMOVC out, TRANSFORM, CDMOVC back)
+            if rest[0] != 'CONVERTING': raise CvtError('INSPECT of a reference modification')
+            out = []
+            tmp = self.refmod_get(r, out)
+            out.append(f'TRANSFORM {tmp} FROM {rest[1]} TO {rest[3]}')
+            self.refmod_put(r, tmp, self.const_num(self.tmpsize[tmp]), out)
+            return out
         out = []
         if rest[0] == 'REPLACING':
             k = 1
@@ -1005,6 +1134,12 @@ def convert(path, cpydirs, keep=(), fixes=None):
     pd = next(i for i, l in enumerate(lines) if re.match(r'\s*PROCEDURE\s+DIVISION', l))
     dd = next(i for i, l in enumerate(lines) if re.match(r'\s*DATA\s+DIVISION', l))
     head, data, proc = lines[:dd], lines[dd:pd], lines[pd:]
+    # a 77 item after an 01 item: the compiler wants the 77 items first; an 01 is the same here
+    seen01 = False
+    for i, l in enumerate(data):
+        if re.match(r'\s*(WORKING-STORAGE|LINKAGE|FILE)\s+SECTION', l): seen01 = False
+        elif re.match(r'\s*0?1\s', l): seen01 = True
+        elif seen01 and re.match(r'\s*77\s', l): data[i] = re.sub(r'77', '01', l, count=1)
     head, files = fix_files(head)
     dtoks = tokenize(data)
     items = parse_data(dtoks)
@@ -1012,6 +1147,8 @@ def convert(path, cpydirs, keep=(), fixes=None):
     pname = re.search(r'PROGRAM-ID\.\s*([A-Z0-9]+)', ' '.join(head)).group(1)
     g = Gen(model, pname)
     g.files = files
+    for f in files.values():
+        if f.get('nominal'): g.ws.append(f"       01  {f['nominal']} PIC X({g.size_of(f['rkey'])}).")
     # procedure division header (may span lines up to the period)
     ptoks = tokenize(proc)
     k = 0
@@ -1113,7 +1250,13 @@ def fix_files(head):
         info = dict(status=st.group(1) if st else None, org=org.group(1) if org else 'SEQUENTIAL')
         files[name] = info
         if info['org'] == 'INDEXED':
-            if acc and acc.group(1) != 'SEQUENTIAL': raise CvtError(f'{name}: ACCESS {acc.group(1)}')
+            mode = acc.group(1) if acc else 'SEQUENTIAL'
+            if mode == 'RANDOM':
+                # ISAM random access: the key to read goes in a NOMINAL KEY in WORKING-STORAGE (set before each READ)
+                info.update(nominal=f'CDK-{len(files):02d}', rkey=key.group(1))
+                return (f'SELECT {name} ASSIGN TO DA-I-{dd}\n               ACCESS IS RANDOM\n'
+                        f'               NOMINAL KEY IS {info["nominal"]}\n               RECORD KEY IS {key.group(1)}.')
+            if mode != 'SEQUENTIAL': raise CvtError(f'{name}: ACCESS {mode}')
             return f'SELECT {name} ASSIGN TO DA-I-{dd}\n               ACCESS IS SEQUENTIAL\n               RECORD KEY IS {key.group(1)}.'
         return f'SELECT {name} ASSIGN TO UT-S-{dd}.'
     text = re.sub(r'SELECT\s[^.]*\.', sel, text)

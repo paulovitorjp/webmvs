@@ -252,7 +252,7 @@ try {
     await shot('carddemo-account');
     await key('F3');
     t = await waitText(/Main Menu/, 30000, 'main menu again');
-    await typeLine('2');
+    await typeLine('11');
     t = await waitText(/not available in this version/, 30000, 'not available message');
     check('CardDemo: an option that is not included says so', true, t.split('\n').filter((l) => /not available/.test(l)).map((l) => l.trim()));
     await shot('carddemo-not-available');
@@ -267,6 +267,27 @@ try {
     await shot('carddemo-bill-payment');
     await key('F3');
     t = await waitText(/Main Menu/, 30000, 'main menu after bill payment');
+    // card update (a write): the name on card 9680294154603697 changes, then the card view shows it
+    await typeLine('5');
+    t = await waitText(/Update Credit Card Details/, 30000, 'card update screen');
+    await unlocked(); await page.keyboard.type('000000000019680294154603697', { delay: 20 }); await page.keyboard.press('Enter');
+    t = await waitText(/Details of selected card shown above/, 30000, 'card details');
+    const newName = /WEBMVS TESTER A/.test(t) ? 'Webmvs Tester B' : 'Webmvs Tester A';
+    await key('End'); await page.keyboard.type(newName, { delay: 20 }); await page.keyboard.press('Enter');
+    t = await waitText(/Changes validated/, 30000, 'card update validated');
+    await key('F5');
+    t = await waitText(/Changes committed to database/, 30000, 'card update saved');
+    await shot('carddemo-card-update');
+    await key('F3');
+    t = await waitText(/Main Menu/, 30000, 'main menu after card update');
+    await typeLine('4');
+    t = await waitText(/View Credit Card Detail/, 30000, 'card view screen');
+    await unlocked(); await page.keyboard.type('000000000019680294154603697', { delay: 20 }); await page.keyboard.press('Enter');
+    t = await waitText(new RegExp(newName.toUpperCase()), 30000, 'card view shows the new name');
+    check(`CardDemo: card update saved (card view shows ${newName.toUpperCase()})`, true, t.split('\n').filter((l) => /Name on card/.test(l)).map((l) => l.trim()));
+    await shot('carddemo-card-view-updated');
+    await key('F3');
+    t = await waitText(/Main Menu/, 30000, 'main menu after card view');
     await leave();
     step('CardDemo user: back at READY');
     await signon();
