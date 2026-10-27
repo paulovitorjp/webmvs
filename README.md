@@ -6,7 +6,8 @@ serves static files.
 
 Runs MVS/CE by Philip Young (https://github.com/MVS-sysgen/sysgen), based on Jay Moseley's MVS 3.8j sysgen
 (http://www.jaymoseley.com/hercules/), with KICKS for TSO by Mike Noel (http://www.kicksfortso.com/), a CICS-like
-transaction monitor that runs under TSO. Emulation by Hercules Hyperion.
+transaction monitor that runs under TSO, and the CardDemo sample application
+(https://github.com/aws-samples/aws-mainframe-modernization-carddemo). Emulation by Hercules Hyperion.
 
 You see the IPL on the MVS master console (Console tab), then you log on to TSO in a 3270 terminal
 (TSO tab). TSO user `MVSCE02`, password `PASS4U` (the public MVS/CE defaults).
@@ -60,6 +61,48 @@ KICKS is not in this repository: its license allows redistribution of the comple
 `scripts/build.sh kicks` downloads the distribution zip (sha256 pinned) and installs it with a native Hercules
 (`scripts/kicks-install.py`, following the KICKS installation guide). The site offers the unmodified zip at
 `/kicks/kicks-tso-v1r5m0.zip` with its license, `/kicks/kicks-license.txt`.
+
+## CardDemo
+[CardDemo](https://github.com/aws-samples/aws-mainframe-modernization-carddemo) is a credit card sample
+application (CICS, COBOL, VSAM). Part of it runs here under KICKS, on its own volume CARDD0 (device 0352),
+converted to the ANS COBOL of MVS 3.8J. Its disk data loads only when you use it.
+
+1. On the TSO tab, log on as `MVSCE02` (password `PASS4U`).
+2. At `READY`, type `CARDDEMO` and press Enter. KICKS lists the modules it loads; press Enter at `***`.
+3. The CardDemo sign-on screen shows. Sign on as `USER0001` (a regular user) or `ADMIN001` (an administrator),
+   password `PASSWORD`. The other users are `USER0002`-`USER0005` and `ADMIN002`-`ADMIN005`, same password.
+4. The main menu (users) or the admin menu (administrators) shows. Type an option number and press Enter.
+   PF3 goes back; PF3 at the sign-on screen ends CardDemo and KICKS (press Enter for `READY`).
+
+What works (the original programs, converted):
+
+| Menu | Option | Program | |
+|---|---|---|---|
+| sign-on | | COSGN00C | users from the USRSEC file |
+| main menu | | COMEN01C | |
+| main menu | 1 Account View | COACTVWC | account, customer and card data (try account `00000000001`) |
+| main menu | 3 Credit Card List | COCRDLIC | PF7/PF8 page |
+| main menu | 4 Credit Card View | COCRDSLC | account and card number (e.g. `00000000001`, `9680294154603697`) |
+| main menu | 6 Transaction List | COTRN00C | PF7/PF8 page |
+| main menu | 7 Transaction View | COTRN01C | transaction id (e.g. `0000000000683580`) |
+| admin menu | | COADM01C | |
+| admin menu | 1 User List | COUSR00C | PF7/PF8 page |
+
+Batch: the file readers CBACT02C, CBACT03C and CBCUS01C are in `CARDDEMO.LOADLIB`; the job
+`CARDDEMO.JCL(READALL)` runs them (`SUBMIT 'CARDDEMO.JCL(READALL)'` at `READY`).
+
+Not in this version: the update and add functions (account, card, user, transaction), bill payment, reports,
+pending authorizations (IMS, MQ), transaction type maintenance (Db2) and the other batch jobs (they need SORT,
+Db2 or language features this COBOL does not have). Their menu options answer
+"... is not available in this version". The data files are read and written by the programs that work; your
+changes stay in your browser like the rest of the system.
+
+CardDemo is not in this repository. `scripts/build.sh carddemo` downloads the repository at a pinned commit
+(sha256 pinned) and installs it with a native Hercules (`scripts/carddemo-install.py`): the COBOL programs are
+converted by `scripts/carddemo/cob2ans.py` (with the source changes in `scripts/carddemo/fixes.py` and small
+COBOL helper subprograms in `scripts/carddemo/helpers/`), the BMS maps go through the KICKS map generator, the
+data files become VSAM KSDS files with their alternate indexes (catalog `UCCARDD0`, alias `CARDDEMO`). The
+original and the converted sources are on the volume (`CARDDEMO.ORIGCBL`, `CARDDEMO.COBOL`).
 
 ## How it works
 ```
@@ -130,6 +173,7 @@ All versions are pinned in [docs/PINS.md](docs/PINS.md).
    scripts/build.sh ext       # Hyperion extpkgs (crypto, decNumber, SoftFloat, telnet) for wasm32
    scripts/build.sh build     # patches + emconfigure + make -> hercules.js / hercules.wasm
    scripts/build.sh kicks     # KICKS for TSO: download (sha256 pinned) + install with native Hercules (about 5 min)
+   scripts/build.sh carddemo  # CardDemo: download (sha256 pinned), convert, install on CARDD0 (about 3 min)
    scripts/build.sh chunks    # lazy DASD chunks + manifest from the MVS/CE volumes (boot traces: dasd/manifest/)
    scripts/build.sh seed      # seed shadow file (SMF off)
    ```
@@ -166,6 +210,8 @@ These parts are NOT under the Apache License and keep their own licenses:
 - MVS 3.8J is public domain; the MVS/CE add-ons keep their own terms;
 - KICKS for TSO (Mike Noel): its own license (`kicks-license.txt` in the distribution zip, also on the site at
   `/kicks/kicks-license.txt`). No KICKS file is in this repository.
+- CardDemo (Copyright Amazon.com, Inc. or its affiliates): Apache-2.0. No CardDemo file is in this repository;
+  the site has its `LICENSE` and `NOTICE` in `/carddemo/`.
 
 Each bundle has `LICENSE`, `NOTICE` and the QPL text in its `source/` folder (and `licenses/`, `SOURCE.txt`).
 
@@ -178,6 +224,7 @@ Each bundle has `LICENSE`, `NOTICE` and the QPL text in its `source/` folder (an
 | [MVS/CE](https://github.com/MVS-sysgen/sysgen) v3.0.0 (MVS-sysgen project) | see its repository | the DASD volumes are built from its release; the sysgen automates Jay Moseley's procedures |
 | [Jay Moseley's MVS 3.8J sysgen](https://www.jaymoseley.com/hercules/) | | the basis of MVS/CE |
 | [KICKS for TSO](http://www.kicksfortso.com/) 1.5.0 (Mike Noel) | KICKS license (`kicks-license.txt`; free use, redistribution of the complete package only) | installed on the KICKS0 volume by `scripts/build.sh kicks`; the site offers the unmodified zip in `/kicks/` |
+| [CardDemo](https://github.com/aws-samples/aws-mainframe-modernization-carddemo) (Copyright Amazon.com, Inc. or its affiliates) | Apache-2.0 | modified (converted to ANS COBOL for KICKS) and installed on the CARDD0 volume by `scripts/build.sh carddemo` |
 | [athornton/tn3270](https://github.com/athornton/tn3270) (Adam Thornton) | MIT | `web/vendor/tn3270/LICENSE` |
 | 3270 font (x3270 BDF font, Paul Mattes, Jeff Sparkes, GTRC) | BSD-style | `web/vendor/tn3270/packages/canvas/assets/LICENSE-3270-font.txt`; see also [rbanffy/3270font](https://github.com/rbanffy/3270font) |
 | [coi-serviceworker](https://github.com/gzuidhof/coi-serviceworker) (Guido Zuidhof) | MIT | `web/vendor/coi-serviceworker/LICENSE` |

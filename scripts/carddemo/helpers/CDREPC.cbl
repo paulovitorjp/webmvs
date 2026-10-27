@@ -1,0 +1,22 @@
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. CDREPC.
+      * CDREPC T TLEN KEEP FILL: EVERY BYTE OF T THAT IS NOT KEEP
+      * BECOMES FILL (INSPECT ... CHARACTERS BY).
+       ENVIRONMENT DIVISION.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       77  I        PIC S9(8) COMP.
+       LINKAGE SECTION.
+       01  T.
+           05  TC   PIC X OCCURS 32000 TIMES.
+       01  TLEN     PIC S9(8) COMP.
+       01  KEEP     PIC X.
+       01  FILL     PIC X.
+       PROCEDURE DIVISION USING T TLEN KEEP FILL.
+       P0.
+           MOVE 1 TO I.
+           PERFORM P1 UNTIL I > TLEN.
+           GOBACK.
+       P1.
+           IF TC (I) NOT = KEEP MOVE FILL TO TC (I).
+           ADD 1 TO I.

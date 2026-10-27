@@ -62,6 +62,7 @@ HERCLOGO  herclogo.txt
 # MVSCE01/02: NOT ALLOCATED, VOLUME NOT AVAILABLE). 1,094,964 bytes, almost empty.
 0251    3350    DASD/work00.3350           sf=shadow/work00_*.cckd
 0351    3350    DASD/kicks0.3350           sf=shadow/kicks0_*.cckd   # KICKS for TSO (scripts/build.sh kicks)
+0352    3350    DASD/cardd0.3350           sf=shadow/cardd0_*.cckd   # CardDemo (scripts/build.sh carddemo)
 # ----------------------------------------------- consoles
 0010    3270    CONSOLE      # master console (terminal group name; client asks for @0010 or @CONSOLE)
 0009    3215-C  /            # alternate console (required for HAO automation)

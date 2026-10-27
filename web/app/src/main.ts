@@ -100,7 +100,7 @@ function select(id: string): void {
   focusTerminal();
 }
 /** shown once after a new image replaced the saved changes of system volumes (see setupPersist / persist.upgrade) */
-const UPDATE_NOTICE = 'webmvs was updated with KICKS; system changes you saved were replaced (your data sets are kept).';
+const UPDATE_NOTICE = 'webmvs was updated; system changes you saved were replaced (your data sets are kept).';
 function renderHint(t: Tab | undefined): void {
   $('hint').innerHTML = (t?.notice ? `<span class="notice">${t.notice}</span> ` : '') + (t?.hint ?? '');
 }
@@ -193,7 +193,7 @@ function addTso(): Tab {
   tsoCount++;
   const id = `tso${tsoCount}`;
   const hint = tsoCount === 1
-    ? 'TSO: press <kbd>Enter</kbd>, then type <b>LOGON MVSCE02</b> and <kbd>Enter</kbd>. Password: <b>PASS4U</b>. At <b>READY</b>, <b>KICKS</b> starts KICKS for TSO. End with <b>LOGOFF</b>.'
+    ? 'TSO: press <kbd>Enter</kbd>, then type <b>LOGON MVSCE02</b> and <kbd>Enter</kbd>. Password: <b>PASS4U</b>. At <b>READY</b>, <b>KICKS</b> starts KICKS for TSO, <b>CARDDEMO</b> the CardDemo application. End with <b>LOGOFF</b>.'
     : `TSO session ${tsoCount}: one user ID can be logged on only once. Use <b>MVSCE01</b> / <b>CUL8TR</b> here if MVSCE02 is in use.`;
   const t = makeTab(id, tsoCount === 1 ? 'TSO' : `TSO ${tsoCount}`, hint);
   return t;

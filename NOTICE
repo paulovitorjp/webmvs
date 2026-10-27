@@ -45,6 +45,18 @@ KICKS for TSO 1.5.0
   on the KICKS0 volume. No KICKS file is in this repository. The site offers the complete, unmodified
   zip (kicks/kicks-tso-v1r5m0.zip) and its license (kicks/kicks-license.txt).
 
+CardDemo (aws-samples/aws-mainframe-modernization-carddemo, commit 59cc6c2)
+  https://github.com/aws-samples/aws-mainframe-modernization-carddemo
+  Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+  License: Apache-2.0.
+  scripts/build.sh carddemo downloads the repository at the pinned commit (sha256 pinned) and installs
+  part of it on the CARDD0 volume. The files were modified: the COBOL programs are converted to the
+  ANS COBOL dialect of MVS 3.8J by scripts/carddemo/cob2ans.py with the changes in
+  scripts/carddemo/fixes.py (menu entries of programs that are not included say so), the BMS maps
+  lose attributes the KICKS map generator does not support (scripts/carddemo-install.py), and the
+  data files are loaded as VSAM KSDS. The original sources are on the volume too (CARDDEMO.ORIGCBL).
+  The site offers CardDemo's LICENSE and NOTICE in carddemo/.
+
 ------------------------------------------------------------------------------------------
 athornton/tn3270 (web/vendor/tn3270/, not modified)
   https://github.com/athornton/tn3270

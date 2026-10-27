@@ -57,7 +57,7 @@ HCOMMIT=$(git -C "$SRC" rev-parse HEAD)
 for n in $PATCHES; do cp "$REPO"/patches/hyperion/"$n"-*.patch "$DIST.tmp/source/patches/hyperion/"; done
 cp "$REPO"/src/wasm/{Makefile.wasm,hdl_static.c,library_webload.js,wasm_main.c,wasmsock.c,wasmsock.h,webrt.c,webrt.h} "$DIST.tmp/source/src/wasm/"
 cp "$REPO"/scripts/{build-wasm.sh,configure-wasm.sh,build-extpkgs-wasm.sh,mk-dasd-chunks.sh,vtamlst-trim.py,mk-dist-dev.sh,mk-seed-shadow.py} "$DIST.tmp/source/scripts/"
-for f in src/wasm/lazydasd.cpp src/wasm/library_lazydasd.js src/wasm/outsink.cpp scripts/build.sh scripts/bundle.sh scripts/bundle-hash.py scripts/dasd-chunk.py scripts/dasd-packs.py src/wasm/library_webload.js web/runtime/mvs-persist.js web/runtime/mvs-snapshot.js scripts/vtamlib-stub.py scripts/vtamlst-edit.py scripts/kicks-install.py scripts/data/vtamlib-iedia-stub.json scripts/data/vtamlib-iedia-stub.jcl; do if [ -f "$REPO/$f" ]; then mkdir -p "$(dirname "$DIST.tmp/source/$f")"; cp "$REPO/$f" "$DIST.tmp/source/$f"; fi; done   # lazy DASD + persistence, VTAMLIB stub (no IST025I)
+for f in src/wasm/lazydasd.cpp src/wasm/library_lazydasd.js src/wasm/outsink.cpp scripts/build.sh scripts/bundle.sh scripts/bundle-hash.py scripts/dasd-chunk.py scripts/dasd-packs.py src/wasm/library_webload.js web/runtime/mvs-persist.js web/runtime/mvs-snapshot.js scripts/vtamlib-stub.py scripts/vtamlst-edit.py scripts/kicks-install.py scripts/carddemo-install.py scripts/carddemo/cob2ans.py scripts/carddemo/fixes.py scripts/carddemo/helpers/CDMOVC.cbl scripts/carddemo/helpers/CDSTRG.cbl scripts/carddemo/helpers/CDDATE.cbl scripts/carddemo/helpers/CDREPC.cbl scripts/carddemo/helpers/CDNUMV.cbl scripts/data/vtamlib-iedia-stub.json scripts/data/vtamlib-iedia-stub.jcl; do if [ -f "$REPO/$f" ]; then mkdir -p "$(dirname "$DIST.tmp/source/$f")"; cp "$REPO/$f" "$DIST.tmp/source/$f"; fi; done   # lazy DASD + persistence, VTAMLIB stub (no IST025I)
 cp "$REPO"/conf/{web.cnf,web-browser.rc,web-shutdown.rc} "$DIST.tmp/source/conf/"
 cp "$REPO"/docs/PINS.md "$DIST.tmp/source/PINS.md"
 # Licenses of the source copy: Apache-2.0 for the project code (LICENSE, NOTICE), QPL 1.0 text and the
@@ -113,6 +113,13 @@ if [ -f "$KICKS_ZIP" ]; then
   [ -s "$DIST.tmp/kicks/kicks-license.txt" ] || { echo "no kicks-license.txt in $KICKS_ZIP"; exit 1; }
   echo "kicks: $(sha256sum "$DIST.tmp/kicks/kicks-tso-v1r5m0.zip" | cut -c1-64)"
 else echo "no KICKS zip ($KICKS_ZIP): run scripts/build.sh kicks"; exit 1; fi
+# CardDemo (Apache-2.0, Copyright Amazon.com, Inc. or its affiliates): modified programs on the CARDD0 volume;
+# its LICENSE and NOTICE go with the site (scripts/build.sh carddemo pins the tarball's sha256)
+CARDDEMO_TGZ=${CARDDEMO_TGZ:-$(ls "$HOME"/build/webmvs/carddemo/carddemo-*.tar.gz 2>/dev/null | head -1)}
+if [ -f "$CARDDEMO_TGZ" ]; then
+  mkdir -p "$DIST.tmp/carddemo"
+  for f in LICENSE NOTICE; do tar -xzOf "$CARDDEMO_TGZ" --wildcards "*/$f" > "$DIST.tmp/carddemo/$f.txt"; [ -s "$DIST.tmp/carddemo/$f.txt" ] || { echo "no $f in $CARDDEMO_TGZ"; exit 1; }; done
+else echo "no CardDemo tarball: run scripts/build.sh carddemo"; exit 1; fi
 for f in pjes2 zeod quiesce poweroff; do tar -xOf "$TAR" "MVSCE/SCRIPTS/$f" > "$DIST.tmp/boot/SCRIPTS/$f"; done
 python3 - "$DASD" "$DIST.tmp/dasd" <<'EOF'
 import json, os, shutil, sys

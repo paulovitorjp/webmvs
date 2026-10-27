@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 // SPDX-License-Identifier: Apache-2.0
-// KICKS and upgrade test of the visitor page (Playwright; Chromium, Firefox or WebKit). Runs on the build host.
+// KICKS, CardDemo and upgrade test of the visitor page (Playwright; Chromium, Firefox or WebKit). Runs on the
+// build host.
 //
 // Usage: node scripts/e2e-kicks.mjs <chromium|firefox|webkit> <url> <out dir> <tag> [--profile <dir>]
-//          [--prep] [--check-saved] [--expect-upgrade] [--no-kicks] [--shutdown] [--mobile]
+//          [--prep] [--check-saved] [--expect-upgrade] [--no-kicks] [--carddemo] [--shutdown] [--mobile]
 //   default      wait for TSO, log on MVSCE02, start KICKS, KSGM, Clear, INQ1 with customer 400001 (MCDONALD),
 //                PF3 (Murach menu), PF3, BTC0 (TAC menu), PF12, Clear, KSSF (READY), LOGOFF
 //   --prep       (no KICKS) save a member MVSCE02.CLIST(UPGTEST) and a new data set MVSCE02.UPGTEST.DATA, then
@@ -11,6 +12,9 @@
 //   --check-saved      the member and the data set are still there (LIST, LISTCAT)
 //   --expect-upgrade   the runtime removed the shadows of the changed volumes (persist.upgrade) and the page
 //                      shows the update notice
+//   --carddemo   after KICKS: CARDDEMO, sign on USER0001, account 00000000001 (Immanuel Kessler), a menu option
+//                that is not included ('not available'), PF3 to the sign-on screen, PF3, KSSF; then ADMIN001 and
+//                the user list (USER0001 in it); --carddemo-only: the same without the KICKS samples
 //   --mobile     iPhone-sized viewport with touch (layout sanity: no horizontal overflow, terminal visible)
 // Output: <out>/kicks-<tag>.json, screenshots <out>/<tag>-<step>.png
 import { createRequire } from 'node:module';
@@ -98,7 +102,7 @@ try {
     check('upgrade: no full reset', !res.persist.reset, res.persist.resetWhy);
     check('upgrade: user volume shadows kept', ['pub000_1.cckd', 'work00_1.cckd'].every((f) => up.kept.includes(f)), up.kept);
     const hint = await ev(() => document.getElementById('hint').textContent);
-    check('upgrade: notice shown', /updated with KICKS/.test(hint), hint);
+    check('upgrade: notice shown', /webmvs was updated/.test(hint), hint);
     await shot('upgrade-notice');
   }
   await waitFn(() => window.mvs.active() === 'tso1', null, 240000, 'TSO ready (auto-switch)');
@@ -146,7 +150,7 @@ try {
     check('saved: data set on its volume', !/NOT IN CATALOG|NOT FOUND/.test(t), t.split('\n').filter((l) => l.trim()).slice(-5).map((l) => l.trim()));
     await shot('saved');
   }
-  if (!flag('no-kicks') && !flag('prep')) {
+  if (!flag('no-kicks') && !flag('prep') && !flag('carddemo-only')) {
     await key('Escape');
     const tk = Date.now();
     await typeLine('kicks');
@@ -188,6 +192,65 @@ try {
     await ready(60000);
     step('KSSF: back at READY', { blankAfterKssf: !res.afterKssf.length });
     check('KICKS ended (KSSF -> READY)', true, null);
+  }
+  if (flag('carddemo') || flag('carddemo-only')) {
+    // CARDDEMO: KICKS with CardDemo's tables; its first transaction CC00 shows the sign-on screen
+    const signon = async () => {
+      await key('Escape');
+      const tc = Date.now();
+      await typeLine('carddemo');
+      for (let i = 0; ; i++) {
+        t = await text();
+        if (/Type your User ID and Password/.test(t)) break;
+        if (/^\s*\*\*\*\s*$/m.test(t) && await ev(() => window.mvs.unlocked('tso1'))) { await page.keyboard.press('Enter'); await sleep(500); continue; }
+        if (/NOT FOUND|NOT IN CATALOG|ABEND|IKJ56|Abend/.test(t) || i > 600) { console.log(t); throw new Error('CardDemo did not start'); }
+        await sleep(250);
+      }
+      return Number(((Date.now() - tc) / 1000).toFixed(1));
+    };
+    const leave = async () => {   // PF3 back to the sign-on screen, PF3 ends CardDemo, KSSF ends KICKS
+      for (let i = 0; i < 4 && !/Type your User ID/.test(await text()); i++) { await key('F3'); await sleep(1500); }
+      await key('F3'); await sleep(1500);
+      await key('Escape'); await typeLine('KSSF'); await sleep(3000);
+      // KICKS ends with a blank screen or 'KICKS is shutting down...': Enter (when the keyboard is free) until READY
+      for (let i = 0; i < 30 && !/READY\s*$/m.test(await text()); i++) {
+        if (await ev(() => window.mvs.unlocked('tso1'))) await page.keyboard.press('Enter');
+        await sleep(2000);
+      }
+      await ready(60000);
+    };
+    res.carddemoStartS = await signon();
+    step('CardDemo sign-on screen', { s: res.carddemoStartS });
+    await shot('carddemo-signon');
+    check('CardDemo: sign-on screen without a message', !/Invalid key/.test(await text()), null);
+    await sleep(1500); await key('Home'); await page.keyboard.type('USER0001PASSWORD', { delay: 20 }); await page.keyboard.press('Enter');
+    t = await waitText(/Main Menu/, 60000, 'CardDemo main menu');
+    check('CardDemo: USER0001 signs on (main menu)', /Account View/.test(t), null);
+    await shot('carddemo-menu');
+    await typeLine('1');
+    t = await waitText(/View Account|Account Number/, 60000, 'account view');
+    await unlocked(); await page.keyboard.type('00000000001', { delay: 20 }); await page.keyboard.press('Enter');
+    t = await waitText(/Kessler|KESSLER/, 60000, 'account 00000000001 (Immanuel Kessler)');
+    check('CardDemo: account 00000000001 shows its customer', /Immanuel/.test(t), t.split('\n').filter((l) => /Kessler|Immanuel|00000000001/.test(l)).map((l) => l.trim()));
+    await shot('carddemo-account');
+    await key('F3');
+    t = await waitText(/Main Menu/, 30000, 'main menu again');
+    await typeLine('2');
+    t = await waitText(/not available in this version/, 30000, 'not available message');
+    check('CardDemo: an option that is not included says so', true, t.split('\n').filter((l) => /not available/.test(l)).map((l) => l.trim()));
+    await shot('carddemo-not-available');
+    await leave();
+    step('CardDemo user: back at READY');
+    await signon();
+    await sleep(1500); await key('Home'); await page.keyboard.type('ADMIN001PASSWORD', { delay: 20 }); await page.keyboard.press('Enter');
+    t = await waitText(/Admin Menu/i, 60000, 'CardDemo admin menu');
+    await shot('carddemo-admin-menu');
+    await typeLine('1');
+    t = await waitText(/USER0001/, 60000, 'user list');
+    check('CardDemo: admin user list shows USER0001', true, t.split('\n').filter((l) => /USER000/.test(l)).slice(0, 3).map((l) => l.trim()));
+    await shot('carddemo-user-list');
+    await leave();
+    step('CardDemo admin: back at READY');
   }
   await key('Escape'); await typeLine('logoff');
   await waitText(/Logon ===>|CLEAR the screen|LOGGED OFF/, 30000, 'logged off').catch(() => {});

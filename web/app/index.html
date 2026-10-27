@@ -71,7 +71,8 @@ window.coi = { doReload: function () {
     <p class="attrib">Runs <a href="https://github.com/MVS-sysgen/sysgen">MVS/CE</a> by Philip Young, based on Jay Moseley's
     <a href="http://www.jaymoseley.com/hercules/">MVS 3.8j sysgen</a>. Emulation by
     <a href="https://github.com/SDL-Hercules-390/hyperion">Hercules Hyperion</a>.
-    <a href="http://www.kicksfortso.com/">KICKS for TSO</a> by Mike Noel.</p>
+    <a href="http://www.kicksfortso.com/">KICKS for TSO</a> by Mike Noel.
+    <a href="https://github.com/aws-samples/aws-mainframe-modernization-carddemo">CardDemo</a> sample application (Apache-2.0).</p>
     <p id="loader-actions" hidden><button id="loader-retry" type="button">Try again</button></p>
   </div>
 </div>
@@ -103,7 +104,8 @@ window.coi = { doReload: function () {
   <footer class="attrib">webmvs by <a href="https://github.com/paulovitorjp">Paulo Pereira (@paulovitorjp)</a>. Runs <a href="https://github.com/MVS-sysgen/sysgen">MVS/CE</a> by Philip Young, based on Jay Moseley's
     <a href="http://www.jaymoseley.com/hercules/">MVS 3.8j sysgen</a>. Emulation by
     <a href="https://github.com/SDL-Hercules-390/hyperion">Hercules Hyperion</a>.
-    <a href="http://www.kicksfortso.com/">KICKS for TSO</a> by Mike Noel.</footer>
+    <a href="http://www.kicksfortso.com/">KICKS for TSO</a> by Mike Noel.
+    <a href="https://github.com/aws-samples/aws-mainframe-modernization-carddemo">CardDemo</a> sample application (Apache-2.0).</footer>
   <div id="hint"></div>
   <div id="keypad" hidden></div>
   <div id="debug" hidden>
@@ -121,7 +123,9 @@ window.coi = { doReload: function () {
     <b>Console</b> is the MVS master console (device 0010; you see the IPL there and can type operator commands),
     <b>TSO</b> is a 3270 terminal for TSO (devices 0400-0403).</p>
   <p>TSO user: <b>MVSCE02</b>, password <b>PASS4U</b>. At <b>READY</b>, type <b>KICKS</b> to start KICKS for TSO
-    (try transaction <b>INQ1</b> with customer <b>400001</b>; leave with Clear, <b>KSSF</b>).</p>
+    (try transaction <b>INQ1</b> with customer <b>400001</b>; leave with Clear, <b>KSSF</b>).
+    <b>CARDDEMO</b> starts the CardDemo credit card application: sign on as <b>USER0001</b> (or the administrator
+    <b>ADMIN001</b>), password <b>PASSWORD</b>.</p>
   <table class="keys">
     <tr><td>Enter</td><td>Enter</td><td>Esc</td><td>Clear</td></tr>
     <tr><td>F1-F12, Shift+F1-F12</td><td>PF1-PF24</td><td>Ctrl+1 / 2 / 3</td><td>PA1 / PA2 / PA3</td></tr>
@@ -136,6 +140,9 @@ window.coi = { doReload: function () {
     <li><a href="https://github.com/MVS-sysgen/sysgen">MVS/CE</a> (MVS Community Edition), MVS-sysgen project.</li>
     <li><a href="http://www.kicksfortso.com/">KICKS for TSO</a> 1.5.0 by Mike Noel: the unmodified
       <a href="./kicks/kicks-tso-v1r5m0.zip">distribution zip</a> and its <a href="./kicks/kicks-license.txt">license</a>.</li>
+    <li><a href="https://github.com/aws-samples/aws-mainframe-modernization-carddemo">CardDemo</a>, Copyright Amazon.com, Inc. or its
+      affiliates, Apache-2.0 (<a href="./carddemo/LICENSE.txt">license</a>, <a href="./carddemo/NOTICE.txt">notice</a>). Modified:
+      converted to ANS COBOL for MVS 3.8J and KICKS; part of the application is included.</li>
     <li>Based on the MVS 3.8J sysgen by <a href="https://www.jaymoseley.com/hercules/">Jay Moseley</a>. MVS 3.8J is public domain.</li>
     <li>3270 terminal: <a href="https://github.com/athornton/tn3270">athornton/tn3270</a>, MIT license.</li>
     <li>3270 font: x3270 3270 font (Paul Mattes, Jeff Sparkes, GTRC), see <a href="./LICENSE-3270-font.txt">license</a>.</li>
