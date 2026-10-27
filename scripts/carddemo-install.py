@@ -53,9 +53,9 @@ KFILES = [('ACCTDAT', 'CARDDEMO.ACCTDATA.KSDS', None), ('CARDDAT', 'CARDDEMO.CAR
           ('TRANSACT', 'CARDDEMO.TRANSACT.KSDS', None), ('USRSEC', 'CARDDEMO.USRSEC.KSDS', None)]
 # online programs and their transactions (CardDemo CSD); MAPS: mapsets
 ONLINE = [('COSGN00C', 'CC00'), ('COMEN01C', 'CM00'), ('COADM01C', 'CA00'), ('COACTVWC', 'CAVW'),
-          ('COCRDLIC', 'CCLI'), ('COCRDSLC', 'CCDL'), ('COUSR00C', 'CU00'), ('COTRN00C', 'CT00'), ('COTRN01C', 'CT01')]
-OTHER_TRANS = [('CAUP', 'COACTUPC'), ('CB00', 'COBIL00C'), ('CCUP', 'COCRDUPC'), ('CR00', 'CORPT00C'), ('CT02', 'COTRN02C'),
-               ('CU01', 'COUSR01C'), ('CU02', 'COUSR02C'), ('CU03', 'COUSR03C')]
+          ('COCRDLIC', 'CCLI'), ('COCRDSLC', 'CCDL'), ('COUSR00C', 'CU00'), ('COTRN00C', 'CT00'), ('COTRN01C', 'CT01'),
+          ('COUSR01C', 'CU01'), ('COUSR02C', 'CU02'), ('COUSR03C', 'CU03'), ('COTRN02C', 'CT02'), ('COBIL00C', 'CB00')]
+OTHER_TRANS = [('CAUP', 'COACTUPC'), ('CCUP', 'COCRDUPC'), ('CR00', 'CORPT00C')]
 BATCH = ['CBACT02C', 'CBACT03C', 'CBCUS01C']
 READALL = """//READALL  JOB (1),'CARDDEMO',CLASS=A,MSGCLASS=A,MSGLEVEL=(1,1)
 //* CardDemo batch readers: list the card, card xref and customer files
@@ -72,7 +72,7 @@ READALL = """//READALL  JOB (1),'CARDDEMO',CLASS=A,MSGCLASS=A,MSGLEVEL=(1,1)
 //CUSTFILE DD DSN=CARDDEMO.CUSTDATA.KSDS,DISP=SHR
 //SYSOUT   DD SYSOUT=*
 """
-HELPERS = ['CDMOVC', 'CDSTRG', 'CDDATE', 'CDREPC', 'CDNUMV']
+HELPERS = ['CDMOVC', 'CDSTRG', 'CDDATE', 'CDREPC', 'CDNUMV', 'CSUTLDTC']
 
 
 def run_job(h, jcl, outdir, timeout=900, expect=None, maxcc=4):

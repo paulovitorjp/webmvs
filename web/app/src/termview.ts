@@ -15,6 +15,10 @@ import { ebcdicToCg, column } from '../../vendor/tn3270/packages/canvas/src/cg.j
 import type { AtlasGeometry, DrawCell } from '../../vendor/tn3270/packages/canvas/src/geometry.js';
 import type { Rgb } from '@tn3270/core';
 
+/** terminal width (CSS px) below which the rows may be stretched vertically, and the most they stretch */
+const NARROW_PX = 700;
+const STRETCH_MAX = 1.6;
+
 /** ?oia=0 hides the status line under the screen (default: shown, 3270 style). */
 const SHOW_OIA = new URLSearchParams(location.search).get('oia') !== '0';
 /**
@@ -376,9 +380,12 @@ export class TermView {
     const W = list.width * scale, H = list.height * scale;
     if (this.canvas.width !== W) this.canvas.width = W;
     if (this.canvas.height !== H) this.canvas.height = H;
-    const cssScale = fit;   // fractional CSS fit (contain)
-    this.canvas.style.width = `${Math.floor(list.width * cssScale)}px`;
-    this.canvas.style.height = `${Math.floor(list.height * cssScale)}px`;
+    // fractional CSS fit (contain). On a narrow portrait screen the width limits the fit and leaves black space
+    // above and below: the rows then grow taller (up to STRETCH_MAX times), which makes the text easier to read.
+    const fitY = bh / list.height;
+    const cssY = bw < NARROW_PX && fitY > fit ? Math.min(fitY, fit * STRETCH_MAX) : fit;
+    this.canvas.style.width = `${Math.floor(list.width * fit)}px`;
+    this.canvas.style.height = `${Math.floor(list.height * cssY)}px`;
     const ctx = this.ctx;
     ctx.fillStyle = '#000';
     ctx.fillRect(0, 0, W, H);

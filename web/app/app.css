@@ -59,6 +59,12 @@ canvas.screen { display: block; image-rendering: pixelated; image-rendering: cri
 #hint { padding: 5px 10px; font-size: 13px; color: var(--dim); background: var(--panel); border-top: 1px solid var(--line); }
 #hint b { color: var(--fg); }
 #hint .notice { color: #f5c542; font-weight: 600; }
+/* one line: the update or logoff notice of the active tab, closed with its X or the next key */
+#notice { display: flex; align-items: center; gap: 8px; padding: 3px 4px 3px 10px; font-size: 13px; font-weight: 600; color: #f5c542; background: #2a2410; border-bottom: 1px solid #4a3f17; }
+#notice[hidden] { display: none; }
+#notice-text { flex: 1; min-width: 0; }
+#notice-text b { color: #fff; }
+#notice-close { flex: none; padding: 0 8px; font-size: 16px; line-height: 1.3; color: #f5c542; background: transparent; border-color: transparent; }
 #keypad { padding: 6px; background: var(--panel); border-top: 1px solid var(--line); display: flex; flex-direction: column; gap: 4px; }
 #keypad[hidden] { display: none; }
 .padrow { display: flex; flex-wrap: wrap; gap: 4px; }
@@ -101,8 +107,37 @@ dialog a { color: var(--accent); }
 #open-full, #loader-open { display: none; }
 .embed #open-full { display: inline-block; text-decoration: none; color: var(--fg); white-space: nowrap; }
 .embed #loader-open { display: block; }
-.embed .tools > :not(#open-full):not(#keys-btn), .embed #dasd-status, .embed #save-status, .embed #hint, .embed #add-tso { display: none !important; }
+.embed .tools > :not(#open-full):not(#keys-btn), .embed #dasd-status, .embed #save-status, .embed #hint, .embed #notice, .embed #add-tso { display: none !important; }
 .embed header { gap: 8px; padding: 2px 6px; flex-wrap: nowrap; }
 .embed #ipl-status { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
 .embed .attrib { font-size: 11px; padding: 2px 6px; }
 #loader-open.big a { display: inline-block; margin-top: 8px; padding: 12px 22px; font-size: 18px; border-radius: 8px; background: var(--accent); color: #000; text-decoration: none; font-weight: 600; }
+
+/* small screens: the terminal gets the room. Credits (i), help (?) and the less used buttons (more) open sheets. */
+.tool.narrow { display: none; }
+.tool.icon { min-width: 30px; padding: 2px 6px; font: 600 13px ui-monospace, monospace; }
+dialog.sheet { max-width: min(560px, 94vw); background: var(--panel); color: var(--fg); border: 1px solid var(--line); border-radius: 8px; padding: 14px 18px; }
+dialog.sheet::backdrop { background: rgba(0,0,0,.6); }
+dialog.sheet p { margin: 0 0 10px; }
+#more-items { display: flex; flex-direction: column; gap: 8px; min-width: 220px; }
+#more-items button { padding: 10px 12px; text-align: left; }
+@media (max-width: 700px) {
+  header { gap: 4px 6px; padding: 3px 6px; }
+  .brand { font-size: 13px; }
+  #tabs { min-width: 0; overflow-x: auto; scrollbar-width: none; }
+  .tab { padding: 3px 9px; }
+  .tools { order: 2; margin-left: auto; }
+  .tools .more { display: none; }
+  .tool.narrow { display: inline-block; }
+  #ipl-status { order: 3; flex: 1 1 100%; display: block; white-space: nowrap; text-overflow: ellipsis; font-size: 11px; line-height: 1.3; }
+  #dasd-status, #save-status { order: 3; }
+  footer.attrib, #hint { display: none; }
+  #notice { font-size: 12px; }
+  #notice-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #keypad { padding: 4px; gap: 3px; }
+  .padrow { display: grid; gap: 3px; }
+  .padrow.main { grid-template-columns: repeat(7, 1fr); }
+  .padrow.pf { grid-template-columns: repeat(12, 1fr); }
+  .padrow button, .padrow button.wide, .padrow.pf button { min-width: 0; padding: 8px 0; font-size: 11px; }
+}
+@media (max-width: 480px) { .brand { display: none; } }

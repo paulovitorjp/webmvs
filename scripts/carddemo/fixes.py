@@ -3,7 +3,8 @@
 tuples; old must match exactly n times (default 1) in the program after COPY members are expanded."""
 
 # programs of this port (online menu options that run); the other menu options say "not available in this version"
-PORTED = {'COACTVWC', 'COCRDLIC', 'COCRDSLC', 'COTRN00C', 'COTRN01C', 'COUSR00C'}
+PORTED = {'COACTVWC', 'COCRDLIC', 'COCRDSLC', 'COTRN00C', 'COTRN01C', 'COUSR00C', 'COUSR01C', 'COUSR02C', 'COUSR03C',
+          'COTRN02C', 'COBIL00C'}
 NOT_AVAILABLE = 'is not available in this version'
 
 ABEND = ("CALL 'CEE3ABD' USING ABCODE, TIMING.", "STOP RUN.")
@@ -27,6 +28,11 @@ FIXES = {
         ("'is not installed ...'", f"'{NOT_AVAILABLE}'", 2)],
     # sign-on screen after a key it does not take: the cursor goes back to the User ID field, and the message is
     # only for Clear, PA1, PA3 and the PF keys: the browser terminal sends PA2 (redisplay) when KICKS starts
+    # KICKS: one FORMATTIME per format (the date with DATESEP, then the time with TIMESEP)
+    'COBIL00C': [("EXEC CICS FORMATTIME ABSTIME(WS-ABS-TIME) YYYYMMDD(WS-CUR-DATE-X10) DATESEP('-') "
+                  "TIME(WS-CUR-TIME-X08) TIMESEP(':') END-EXEC",
+                  "EXEC CICS FORMATTIME ABSTIME(WS-ABS-TIME) YYYYMMDD(WS-CUR-DATE-X10) DATESEP('-') END-EXEC "
+                  "EXEC CICS FORMATTIME ABSTIME(WS-ABS-TIME) TIME(WS-CUR-TIME-X08) TIMESEP(':') END-EXEC")],
     'COSGN00C': [("MOVE CCDA-MSG-INVALID-KEY TO WS-MESSAGE PERFORM SEND-SIGNON-SCREEN",
                   "MOVE -1 TO USERIDL OF COSGN0AI MOVE 'N' TO WS-ERR-FLG IF " + ' OR '.join(
                       f'EIBAID = {k}' for k in ['DFHCLEAR', 'DFHPA1', 'DFHPA3']

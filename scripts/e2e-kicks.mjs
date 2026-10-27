@@ -13,8 +13,9 @@
 //   --expect-upgrade   the runtime removed the shadows of the changed volumes (persist.upgrade) and the page
 //                      shows the update notice
 //   --carddemo   after KICKS: CARDDEMO, sign on USER0001, account 00000000001 (Immanuel Kessler), a menu option
-//                that is not included ('not available'), PF3 to the sign-on screen, PF3, KSSF; then ADMIN001 and
-//                the user list (USER0001 in it); --carddemo-only: the same without the KICKS samples
+//                that is not included ('not available'), bill payment of account 00000000001, PF3 to the sign-on
+//                screen, PF3, KSSF; then ADMIN001 adds user A0WEBMVS and the user list shows it;
+//                --carddemo-only: the same without the KICKS samples
 //   --mobile     iPhone-sized viewport with touch (layout sanity: no horizontal overflow, terminal visible)
 // Output: <out>/kicks-<tag>.json, screenshots <out>/<tag>-<step>.png
 import { createRequire } from 'node:module';
@@ -101,9 +102,11 @@ try {
     check('upgrade: shadows of the changed volumes removed', up && up.removed.includes('mvsres_1.cckd') && up.removed.includes('mvs000_1.cckd'), up);
     check('upgrade: no full reset', !res.persist.reset, res.persist.resetWhy);
     check('upgrade: user volume shadows kept', ['pub000_1.cckd', 'work00_1.cckd'].every((f) => up.kept.includes(f)), up.kept);
-    const hint = await ev(() => document.getElementById('hint').textContent);
+    const hint = await ev(() => window.mvs.hint());   // the notice line and the tab hint
     check('upgrade: notice shown', /webmvs was updated/.test(hint), hint);
     await shot('upgrade-notice');
+    await page.click('#notice-close');
+    check('upgrade: the X closes the notice', await ev(() => document.getElementById('notice').hidden), null);
   }
   await waitFn(() => window.mvs.active() === 'tso1', null, 240000, 'TSO ready (auto-switch)');
   res.navToTsoS = Number(((await ev(() => performance.now())) / 1000).toFixed(1));
@@ -121,6 +124,20 @@ try {
       term: (() => { const r = document.querySelector('#views')?.getBoundingClientRect(); return r ? [Math.round(r.width), Math.round(r.height)] : null; })() }));
     check('mobile: no horizontal overflow', lay.sw <= lay.cw + 1, lay);
     check('mobile: terminal visible', lay.term && lay.term[0] > 200 && lay.term[1] > 150, lay);
+    // small screen: credits behind (i), help behind (?), no footer or hint text under the terminal, no timing in the status
+    const ui = await ev(() => ({ footer: getComputedStyle(document.querySelector('footer.attrib')).display, hint: getComputedStyle(document.getElementById('hint')).display,
+      status: document.getElementById('ipl-status').textContent, tsoS: document.getElementById('ipl-status').dataset.tsoS,
+      header: Math.round(document.querySelector('header').getBoundingClientRect().height) }));
+    check('mobile: credits and hint text hidden, status without timing', ui.footer === 'none' && ui.hint === 'none' && ui.status === 'TSO ready' && Number(ui.tsoS) > 0 && ui.header < 70, ui);
+    await page.click('#info-btn');
+    const credits = await ev(() => document.getElementById('info-dialog').open ? document.getElementById('info-dialog').textContent : '');
+    check('mobile: (i) shows the credits (KICKS by Mike Noel, CardDemo Apache-2.0)', /Mike Noel/.test(credits) && /CardDemo/.test(credits) && /Apache-2\.0/.test(credits), credits.replace(/\s+/g, ' ').slice(0, 300));
+    await shot('mobile-credits');
+    await page.click('#info-dialog .sheet-close');
+    await page.click('#help-btn');
+    const help = await ev(() => document.getElementById('help-dialog').open ? document.getElementById('help-dialog').textContent : '');
+    check('mobile: (?) shows how to log on', /MVSCE02/.test(help) && /USER0001/.test(help), help.replace(/\s+/g, ' ').slice(0, 200));
+    await page.click('#help-dialog .sheet-close');
     await shot('mobile-ready');
   }
   if (flag('prep')) {
@@ -239,15 +256,39 @@ try {
     t = await waitText(/not available in this version/, 30000, 'not available message');
     check('CardDemo: an option that is not included says so', true, t.split('\n').filter((l) => /not available/.test(l)).map((l) => l.trim()));
     await shot('carddemo-not-available');
+    // bill payment (a write): account 00000000001 pays its balance, then the account shows 0
+    await typeLine('10');
+    t = await waitText(/Bill Payment/i, 30000, 'bill payment screen');
+    await unlocked(); await page.keyboard.type('00000000001', { delay: 20 }); await page.keyboard.press('Enter');
+    t = await waitText(/Confirm to make a bill payment|You have nothing to pay/, 30000, 'bill payment balance');
+    if (/Confirm to make/.test(t)) { await unlocked(); await page.keyboard.type('Y', { delay: 20 }); await page.keyboard.press('Enter'); }
+    t = await waitText(/Payment successful|You have nothing to pay/, 30000, 'bill payment done');
+    check('CardDemo: bill payment', true, t.split('\n').filter((l) => /Payment successful|nothing to pay|balance/i.test(l)).map((l) => l.trim()));
+    await shot('carddemo-bill-payment');
+    await key('F3');
+    t = await waitText(/Main Menu/, 30000, 'main menu after bill payment');
     await leave();
     step('CardDemo user: back at READY');
     await signon();
     await sleep(1500); await key('Home'); await page.keyboard.type('ADMIN001PASSWORD', { delay: 20 }); await page.keyboard.press('Enter');
     t = await waitText(/Admin Menu/i, 60000, 'CardDemo admin menu');
     await shot('carddemo-admin-menu');
+    // add a user (a write), then the user list shows it
+    await typeLine('2');
+    t = await waitText(/Add User/, 30000, 'add user screen');
+    await unlocked();
+    for (const [v, tab] of [['Webmvs', true], ['Tester', true], ['A0WEBMVS', false], ['PASSWORD', false], ['U', false]]) {
+      await page.keyboard.type(v, { delay: 20 }); if (tab) await page.keyboard.press('Tab');
+    }
+    await page.keyboard.press('Enter');
+    t = await waitText(/has been added|already exist/i, 30000, 'user added');
+    check('CardDemo: admin adds user A0WEBMVS', true, t.split('\n').filter((l) => /A0WEBMVS|added|exist/i.test(l)).map((l) => l.trim()));
+    await shot('carddemo-add-user');
+    await key('F3');
+    t = await waitText(/Admin Menu/i, 30000, 'admin menu again');
     await typeLine('1');
     t = await waitText(/USER0001/, 60000, 'user list');
-    check('CardDemo: admin user list shows USER0001', true, t.split('\n').filter((l) => /USER000/.test(l)).slice(0, 3).map((l) => l.trim()));
+    check('CardDemo: admin user list shows the new user A0WEBMVS', /A0WEBMVS/.test(t), t.split('\n').filter((l) => /A0WEBMVS|USER0001/.test(l)).map((l) => l.trim()));
     await shot('carddemo-user-list');
     await leave();
     step('CardDemo admin: back at READY');

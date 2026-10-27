@@ -33,6 +33,8 @@ You see the IPL on the MVS master console (Console tab), then you log on to TSO 
 - TSO tab: TSO on 3270 terminals 0400-0403. `+` opens one more TSO session.
 - Your disks are saved in your browser (OPFS). A data set member that you save is still there after a reload.
   Use **Shut down** before you close the tab; **Reset machine** goes back to the original disks.
+- On a phone the terminal gets most of the screen: **?** shows how to log on, **i** the credits, and **⋯**
+  History, Shut down, Reset machine and About. **Keys** shows or hides the 3270 keys (the choice is remembered).
 - `?debug=1` shows the Hercules log and command line. `?persist=0` starts a fresh machine at every load.
 
 Supported: current desktop Chrome/Edge, Firefox, Safari (tested with Playwright Chromium, Firefox and
@@ -85,17 +87,25 @@ What works (the original programs, converted):
 | main menu | 4 Credit Card View | COCRDSLC | account and card number (e.g. `00000000001`, `9680294154603697`) |
 | main menu | 6 Transaction List | COTRN00C | PF7/PF8 page |
 | main menu | 7 Transaction View | COTRN01C | transaction id (e.g. `0000000000683580`) |
+| main menu | 8 Transaction Add | COTRN02C | account or card number, the transaction fields, `Y` to confirm |
+| main menu | 10 Bill Payment | COBIL00C | account number, `Y` pays the whole balance (it adds a payment transaction) |
 | admin menu | | COADM01C | |
-| admin menu | 1 User List | COUSR00C | PF7/PF8 page |
+| admin menu | 1 User List | COUSR00C | PF7/PF8 page, `U` or `D` on a line updates or deletes that user |
+| admin menu | 2 User Add | COUSR01C | |
+| admin menu | 3 User Update | COUSR02C | user id, Enter, change the fields, PF5 saves |
+| admin menu | 4 User Delete | COUSR03C | user id, Enter, PF5 deletes |
+
+In the card and transaction lists, `S` on a line shows that card or transaction.
 
 Batch: the file readers CBACT02C, CBACT03C and CBCUS01C are in `CARDDEMO.LOADLIB`; the job
 `CARDDEMO.JCL(READALL)` runs them (`SUBMIT 'CARDDEMO.JCL(READALL)'` at `READY`).
 
-Not in this version: the update and add functions (account, card, user, transaction), bill payment, reports,
-pending authorizations (IMS, MQ), transaction type maintenance (Db2) and the other batch jobs (they need SORT,
+Not in this version: account update, card update (`U` in the card list), reports, pending authorizations
+(IMS, MQ), transaction type maintenance (Db2) and the other batch jobs (they need SORT,
 Db2 or language features this COBOL does not have). Their menu options answer
 "... is not available in this version". The data files are read and written by the programs that work; your
-changes stay in your browser like the rest of the system.
+changes stay in your browser like the rest of the system. When a new version of webmvs changes the CardDemo
+volume, it starts again from its original data (the update notice says so; your own data sets are kept).
 
 CardDemo is not in this repository. `scripts/build.sh carddemo` downloads the repository at a pinned commit
 (sha256 pinned) and installs it with a native Hercules (`scripts/carddemo-install.py`): the COBOL programs are

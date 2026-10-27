@@ -102,7 +102,17 @@ function select(id: string): void {
 /** shown once after a new image replaced the saved changes of system volumes (see setupPersist / persist.upgrade) */
 const UPDATE_NOTICE = 'webmvs was updated; system changes you saved were replaced (your data sets are kept).';
 function renderHint(t: Tab | undefined): void {
-  $('hint').innerHTML = (t?.notice ? `<span class="notice">${t.notice}</span> ` : '') + (t?.hint ?? '');
+  $('hint').innerHTML = t?.hint ?? '';
+  $('help-tab').innerHTML = t?.hint ?? '';
+  $('notice-text').innerHTML = t?.notice ?? '';
+  $('notice').hidden = !t?.notice;
+}
+/** the X on the notice line: the notice is closed on every tab (the same text is on all of them) */
+function dismissNotice(): void {
+  for (const t of tabs.values()) t.notice = undefined;
+  renderHint(tabs.get(active));
+  for (const t of tabs.values()) t.view?.paint();
+  focusTerminal();
 }
 
 /**
@@ -217,7 +227,7 @@ function focusTerminal(soft = false): void {
 function act(a: Action): void {
   const t = tabs.get(active), v = t?.view;
   if (!v) return;
-  if (t.notice) { t.notice = undefined; renderHint(t); }
+  if (t.notice) { t.notice = undefined; renderHint(t); v.paint(); }
   v.action(a);
 }
 document.addEventListener('keydown', (e) => {
@@ -260,6 +270,7 @@ function wireCapture(): void {
   });
 }
 
+const KEYPAD_KEY = 'webmvs.keypad';
 function buildKeypad(): void {
   const pad = $('keypad');
   const row = (keys: typeof PAD_MAIN, cls: string): void => {
@@ -279,8 +290,15 @@ function buildKeypad(): void {
   row(PAD_PF.slice(0, 12), 'pf');
   row(PAD_PF.slice(12), 'pf');
   const coarse = matchMedia('(pointer: coarse)').matches;
-  pad.hidden = !coarse;
-  $('keys-btn').addEventListener('click', () => { pad.hidden = !pad.hidden; for (const t of tabs.values()) t.view?.paint(); });
+  // shown by default on a touch screen; Keys shows or hides it, and the choice is remembered
+  let saved: string | null = null;
+  try { saved = localStorage.getItem(KEYPAD_KEY); } catch { /* storage blocked */ }
+  pad.hidden = saved === null ? !coarse : saved === '0';
+  $('keys-btn').addEventListener('click', () => {
+    pad.hidden = !pad.hidden;
+    try { localStorage.setItem(KEYPAD_KEY, pad.hidden ? '0' : '1'); } catch { /* storage blocked */ }
+    for (const t of tabs.values()) t.view?.paint();
+  });
   $('kbd-btn').addEventListener('click', () => focusTerminal(true));
 }
 
@@ -324,6 +342,32 @@ function setupAbout(): void {
   $('about-btn').addEventListener('click', () => d.showModal());
   $('about-close').addEventListener('click', () => d.close());
   $('shutdown-btn').addEventListener('click', () => { d.close(); void shutdown(); });
+  $('notice-close').addEventListener('click', dismissNotice);
+  // small screens: (?) help, (i) credits, and a menu with the header buttons that do not fit (class "more")
+  const sheet = (btn: string, id: string, before?: () => void): HTMLDialogElement => {
+    const s = $<HTMLDialogElement>(id);
+    $(btn).addEventListener('click', () => { before?.(); s.showModal(); });
+    s.addEventListener('click', (e) => {
+      const tgt = e.target as HTMLElement;
+      if (tgt === s || tgt.closest('.sheet-close')) s.close();   // a tap on the backdrop or Close
+    });
+    s.addEventListener('close', () => focusTerminal());
+    return s;
+  };
+  sheet('help-btn', 'help-dialog');
+  const info = sheet('info-btn', 'info-dialog');
+  $('info-about').addEventListener('click', () => { info.close(); d.showModal(); });
+  const more = sheet('more-btn', 'more-dialog', () => {
+    const box = $('more-items');
+    box.replaceChildren();
+    for (const b of document.querySelectorAll<HTMLButtonElement>('.tools .more')) {
+      if (b.hidden) continue;
+      const m = document.createElement('button');
+      m.type = 'button'; m.textContent = b.textContent; m.title = b.title; m.disabled = b.disabled;
+      m.addEventListener('click', () => { more.close(); b.click(); });
+      box.appendChild(m);
+    }
+  });
 }
 async function shutdown(): Promise<void> {
   if (!operator || operator.shuttingDown || herculesStopped) return;
@@ -781,7 +825,10 @@ async function lateAttachConsole(): Promise<void> {
 async function tsoReady(tso: Tab): Promise<void> {
   if (ipl.tso) return;
   ipl.tso = performance.now();
-  status(`TSO ready: IKT007I ${((ipl.tso - ipl.started) / 1000).toFixed(1)} s after IPL`);
+  const secs = ((ipl.tso - ipl.started) / 1000).toFixed(1);
+  $('ipl-status').dataset.tsoS = secs;   // IKT007I seconds after the IPL, for tests (not shown)
+  dlog(`[status] IKT007I ${secs} s after IPL`);
+  status('TSO ready');
   (window as unknown as { mvsState: string }).mvsState = 'tso';
   try { await connectTso(tso); } catch { return; }
   $('add-tso').hidden = false;
@@ -829,7 +876,7 @@ Object.assign(window, {
     // seen() is a window of the newest lines; seenTotal() = lines since the IPL, seenSince(n) = lines from index n on
     seenTotal: () => operator?.seenTotal ?? 0,
     tsoLogoffs: () => tsoLogoffs.slice(),
-    hint: () => $('hint').textContent ?? '',
+    hint: () => `${$('notice').hidden ? '' : `${$('notice-text').textContent ?? ''} `}${$('hint').textContent ?? ''}`,
     seenSince: (n: number) => operator?.seenSince(n) ?? [],
     unlocked: (id: string): boolean => tabs.get(id)?.view?.unlocked() ?? false,
     type: (id: string, s: string): boolean => tabs.get(id)?.view?.session.keyboard.typeString(s) ?? false,

@@ -87,14 +87,18 @@ window.coi = { doReload: function () {
     <span class="tools">
       <button id="kbd-btn" class="tool" title="Show the on-screen keyboard (mobile)">Kbd</button>
       <button id="keys-btn" class="tool" title="3270 keys (Enter, Clear, PA, PF)">Keys</button>
-      <button id="history-btn" class="tool" title="Console history: the master console messages of this machine, also from before the last resume">History</button>
-      <button id="fresh-btn" class="tool" title="Discard the saved machine and start MVS again with an IPL (your disks are kept)" hidden>Start fresh (IPL)</button>
-      <button id="shutdown-top" class="tool" title="Shut down MVS cleanly (JES2 stop, Z EOD, QUIESCE), so that the saved disks are consistent" hidden>Shut down</button>
-      <button id="reset-btn" class="tool" hidden disabled>Reset machine</button>
-      <button id="about-btn" class="tool" title="About and credits">About</button>
+      <button id="history-btn" class="tool more" title="Console history: the master console messages of this machine, also from before the last resume">History</button>
+      <button id="fresh-btn" class="tool more" title="Discard the saved machine and start MVS again with an IPL (your disks are kept)" hidden>Start fresh (IPL)</button>
+      <button id="shutdown-top" class="tool more" title="Shut down MVS cleanly (JES2 stop, Z EOD, QUIESCE), so that the saved disks are consistent" hidden>Shut down</button>
+      <button id="reset-btn" class="tool more" hidden disabled>Reset machine</button>
+      <button id="about-btn" class="tool more" title="About and credits">About</button>
+      <button id="help-btn" class="tool icon narrow" title="How to log on and use the terminal" aria-label="Help">?</button>
+      <button id="info-btn" class="tool icon narrow" title="Credits" aria-label="Credits">i</button>
+      <button id="more-btn" class="tool icon narrow" title="More: history, shut down, reset, about" aria-label="More">&#8943;</button>
       <a id="open-full" class="tool" href="https://webmvs.com/" target="_blank" rel="noopener" title="Open webmvs.com in a new tab">Open full site</a>
     </span>
   </header>
+  <div id="notice" role="status" hidden><span id="notice-text"></span><button id="notice-close" type="button" title="Dismiss" aria-label="Dismiss">&#215;</button></div>
   <main id="views">
     <section id="history" hidden aria-label="Console history">
       <div class="history-head"><b>Console history</b> <span id="history-count"></span> <button id="history-close" class="tool">Close</button></div>
@@ -150,6 +154,28 @@ window.coi = { doReload: function () {
   </ul>
   <p class="actions"><button id="shutdown-btn" title="Typed on the master console: P TSO, Z NET, $PJES2, Z EOD, QUIESCE">Shut down MVS</button>
     <button id="about-close" autofocus>Close</button></p>
+</dialog>
+<dialog id="help-dialog" class="sheet">
+  <h2>Help</h2>
+  <p id="help-tab"></p>
+  <p>TSO user: <b>MVSCE02</b>, password <b>PASS4U</b>. At <b>READY</b>, <b>KICKS</b> starts KICKS for TSO
+    (try transaction <b>INQ1</b> with customer <b>400001</b>; leave with Clear, <b>KSSF</b>).
+    <b>CARDDEMO</b> starts CardDemo: sign on as <b>USER0001</b> (or the administrator <b>ADMIN001</b>), password <b>PASSWORD</b>.</p>
+  <p>Tap the terminal to type. <b>Keys</b> shows or hides the 3270 keys (Enter, Clear, PA, PF).</p>
+  <p class="actions"><span></span><button class="sheet-close" autofocus>Close</button></p>
+</dialog>
+<dialog id="info-dialog" class="sheet">
+  <h2>Credits</h2>
+  <p>webmvs by <a href="https://github.com/paulovitorjp">Paulo Pereira (@paulovitorjp)</a>. Runs <a href="https://github.com/MVS-sysgen/sysgen">MVS/CE</a> by Philip Young, based on Jay Moseley's
+    <a href="http://www.jaymoseley.com/hercules/">MVS 3.8j sysgen</a>. Emulation by
+    <a href="https://github.com/SDL-Hercules-390/hyperion">Hercules Hyperion</a>.
+    <a href="http://www.kicksfortso.com/">KICKS for TSO</a> by Mike Noel.
+    <a href="https://github.com/aws-samples/aws-mainframe-modernization-carddemo">CardDemo</a> sample application (Apache-2.0).</p>
+  <p class="actions"><button id="info-about">About and licenses</button> <button class="sheet-close" autofocus>Close</button></p>
+</dialog>
+<dialog id="more-dialog" class="sheet">
+  <div id="more-items"></div>
+  <p class="actions"><span></span><button class="sheet-close" autofocus>Close</button></p>
 </dialog>
 <dialog id="reset-dialog">
   <h2>Reset machine?</h2>
