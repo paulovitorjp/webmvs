@@ -17,7 +17,7 @@ You see the IPL on the MVS master console (Console tab), then you log on to TSO 
 ![TSO in the browser](docs/img/tso-chromium.png)
 
 ## What it does
-- About 4 MB of disk data loads before the IPL; the rest of the disks (61 MB in 613 small chunk files, KICKS included) loads only when MVS reads it. A second visit uses the
+- About 4 MB of disk data loads before the IPL; the rest of the disks (62 MB in 620 small chunk files, KICKS and CardDemo included) loads only when MVS reads it. A second visit uses the
   browser cache. Measured (headless Playwright on the build host, cold visit, the test logs
   on after the 1.5 s tab switch): TSO READY 9.4-9.9 s after the page opens in Chromium (WebKit 8.7-9.4 s); with a
   9 Mbit/s link and 60 ms latency 13.4-13.7 s.
@@ -114,6 +114,32 @@ COBOL helper subprograms in `scripts/carddemo/helpers/`), the BMS maps go throug
 data files become VSAM KSDS files with their alternate indexes (catalog `UCCARDD0`, alias `CARDDEMO`). The
 original and the converted sources are on the volume (`CARDDEMO.ORIGCBL`, `CARDDEMO.COBOL`).
 
+## File transfer (Download, Upload)
+The **Download** and **Upload** buttons (on a phone: in the `...` menu) move data sets between MVS and your
+computer with IND$FILE, the 3270 file transfer program, which is installed in `SYS2.CMDLIB`.
+
+1. Log on to TSO and stay at `READY` (leave ISPF with `=X`, KICKS with `KSSF`).
+2. Download: type the data set name (`SYS1.PARMLIB(IEASYS00)`, `CARDDEMO.COPYLIB(COSGN00)`), pick Text or
+   Binary, press Download. The page types the `IND$FILE GET` command on the TSO tab and saves the result as a
+   browser download.
+3. Upload: type the name of the new data set (or of a member in a library that exists), choose the file, press
+   Upload. A new data set is created (Text: FB 80, Binary: U; other attributes under "New data set
+   attributes"); an existing one is replaced.
+
+Names are always fully qualified (`MVSCE02.MY.DATA`). Text means EBCDIC on MVS and ASCII with CR LF on your
+computer (trailing blanks of fixed-length records are dropped on the way out); Binary keeps the bytes as they are.
+The transfer uses DFT (structured fields) in 4 KB frames: larger upload frames end the TSO session on this
+system. About 1 MB takes a few seconds; uploads are limited to 4 MB.
+
+Why IND$FILE: the site has no server, so an HTTP endpoint that maps to data sets would have to read and write
+the CCKD disks in the page, with MVS running on them and caching them (VTOC, catalog, PDS directories); IND$FILE
+does the I/O inside MVS, under your TSO user and its RAKF rules, and needs only the terminal connection the page
+already has. Hercules card reader and punch devices would also work, but only through batch jobs (JCL around
+every transfer, and the output sorted out from the JES2 punch), and they carry 80-byte cards.
+
+`scripts/build.sh indfile` installs IND$FILE 2.0.5 (Mike Rayborn) from the package MVS/CE ships for its
+package manager (`MVP/packages/IND$FILE`), as `RX MVP INSTALL IND$FILE` would (`scripts/indfile-install.py`).
+
 ## How it works
 ```
  Browser tab (cross-origin isolated: COOP/COEP headers, or coi-serviceworker on GitHub Pages)
@@ -184,6 +210,7 @@ All versions are pinned in [docs/PINS.md](docs/PINS.md).
    scripts/build.sh build     # patches + emconfigure + make -> hercules.js / hercules.wasm
    scripts/build.sh kicks     # KICKS for TSO: download (sha256 pinned) + install with native Hercules (about 5 min)
    scripts/build.sh carddemo  # CardDemo: download (sha256 pinned), convert, install on CARDD0 (about 3 min)
+   scripts/build.sh indfile   # IND$FILE (3270 file transfer) from the MVS/CE package into SYS2.CMDLIB (about 1 min)
    scripts/build.sh chunks    # lazy DASD chunks + manifest from the MVS/CE volumes (boot traces: dasd/manifest/)
    scripts/build.sh seed      # seed shadow file (SMF off)
    ```
@@ -235,6 +262,7 @@ Each bundle has `LICENSE`, `NOTICE` and the QPL text in its `source/` folder (an
 | [Jay Moseley's MVS 3.8J sysgen](https://www.jaymoseley.com/hercules/) | | the basis of MVS/CE |
 | [KICKS for TSO](http://www.kicksfortso.com/) 1.5.0 (Mike Noel) | KICKS license (`kicks-license.txt`; free use, redistribution of the complete package only) | installed on the KICKS0 volume by `scripts/build.sh kicks`; the site offers the unmodified zip in `/kicks/` |
 | [CardDemo](https://github.com/aws-samples/aws-mainframe-modernization-carddemo) (Copyright Amazon.com, Inc. or its affiliates) | Apache-2.0 | modified (converted to ANS COBOL for KICKS) and installed on the CARDD0 volume by `scripts/build.sh carddemo` |
+| IND$FILE 2.0.5 (Mike Rayborn) | free, use at your own risk (its README); distributed with MVS/CE's package manager | installed in `SYS2.CMDLIB` from the MVS/CE release by `scripts/build.sh indfile` |
 | [athornton/tn3270](https://github.com/athornton/tn3270) (Adam Thornton) | MIT | `web/vendor/tn3270/LICENSE` |
 | 3270 font (x3270 BDF font, Paul Mattes, Jeff Sparkes, GTRC) | BSD-style | `web/vendor/tn3270/packages/canvas/assets/LICENSE-3270-font.txt`; see also [rbanffy/3270font](https://github.com/rbanffy/3270font) |
 | [coi-serviceworker](https://github.com/gzuidhof/coi-serviceworker) (Guido Zuidhof) | MIT | `web/vendor/coi-serviceworker/LICENSE` |

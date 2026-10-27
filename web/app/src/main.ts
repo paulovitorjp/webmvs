@@ -20,6 +20,7 @@
  *   persist=0             do not keep the machine in this browser (memory shadows)
  *   savingms=<ms>         show "Saving..." when data stays unsaved this long (default 400)
  *   autoreset=1           tests: accept the automatic "Reset machine" offer after a failed IPL
+ *   dftbuf=<bytes>        IND$FILE DFT frame size for Download / Upload (default 4096; see filexfer.ts)
  *
  * the machine is kept in this browser (CCKD shadow files on OPFS). Only one tab
  * runs it (Web Lock 'mvs-machine': a second tab shows "MVS is running in another tab"). "Shut down"
@@ -33,6 +34,7 @@ import { LockedError, NativeDevMachine, WasmMachine, type Machine, type Progress
 import { ConsoleOperator } from './operator.js';
 import { actionForKey, PAD_MAIN, PAD_PF } from './keys.js';
 import type { Action } from '@tn3270/frontend';
+import { atReady, localName, runTransfer, type XferOptions, type XferResult } from './filexfer.js';
 
 const q = new URLSearchParams(location.search);
 const DEBUG = q.get('debug') === '1';
@@ -227,6 +229,7 @@ function focusTerminal(soft = false): void {
 function act(a: Action): void {
   const t = tabs.get(active), v = t?.view;
   if (!v) return;
+  if (xfer.busy === t.id) return;          // the page is typing / transferring on this tab
   if (t.notice) { t.notice = undefined; renderHint(t); v.paint(); }
   v.action(a);
 }
@@ -369,6 +372,98 @@ function setupAbout(): void {
     }
   });
 }
+// ------------------------------------------------------------------ file transfer (IND$FILE)
+const UPLOAD_MAX = 4 * 1048576;
+const xfer = { busy: '' as string, cancel: undefined as (() => void) | undefined, last: null as null | { dir: string; dsn: string; ok: boolean; bytes: number; error?: string; command?: string; ms: number } };
+/** the TSO tab a transfer runs on: the selected one, else the first connected TSO tab */
+function xferTab(): Tab | undefined {
+  const a = tabs.get(active);
+  if (a?.id.startsWith('tso') && a.view?.session.isConnected()) return a;
+  return [...tabs.values()].find((t) => t.id.startsWith('tso') && t.view?.session.isConnected());
+}
+async function transfer(o: XferOptions, onProgress: (b: number) => void = () => {}): Promise<XferResult> {
+  const t = xferTab();
+  if (!t?.view) return { ok: false, bytes: 0, error: 'TSO is not up yet: wait for the TSO tab, log on, then try again.' };
+  if (xfer.busy) return { ok: false, bytes: 0, error: 'A transfer is already running.' };
+  if (o.data && o.data.length > UPLOAD_MAX) return { ok: false, bytes: 0, error: `The file is too big (${fmtMB(o.data.length)} MB; at most ${fmtMB(UPLOAD_MAX)} MB).` };
+  const v = t.view, t0 = performance.now();
+  if (active !== t.id) select(t.id);
+  xfer.busy = t.id;
+  dlog(`[xfer] ${o.direction} ${o.dsn} ${o.format} on ${t.id}`);
+  try {
+    const r = await runTransfer(v.session, () => v.text(), o, onProgress, (c) => { xfer.cancel = c; });
+    xfer.last = { dir: o.direction, dsn: o.dsn, ok: r.ok, bytes: r.bytes, ms: Math.round(performance.now() - t0), ...(r.error ? { error: r.error } : {}), ...(r.command ? { command: r.command } : {}) };
+    dlog(`[xfer] ${JSON.stringify(xfer.last)}`);
+    return r;
+  } finally { xfer.busy = ''; xfer.cancel = undefined; v.paint(); }
+}
+function saveFile(name: string, data: Uint8Array, format: string): void {
+  const blob = new Blob([data as Uint8Array<ArrayBuffer>], { type: format === 'text' ? 'text/plain' : 'application/octet-stream' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  window.setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+}
+function setupTransfer(): void {
+  const d = $<HTMLDialogElement>('xfer-dialog'), form = $<HTMLFormElement>('xfer-form');
+  const st = $('xfer-status'), go = $<HTMLButtonElement>('xfer-go'), close = $<HTMLButtonElement>('xfer-cancel');
+  const fileIn = $<HTMLInputElement>('xfer-file');
+  const radio = (name: string): string => (form.querySelector<HTMLInputElement>(`input[name="${name}"]:checked`)?.value ?? '');
+  const say = (text: string, cls = ''): void => { st.textContent = text; st.className = cls; };
+  const dcbDefaults = (): void => {
+    const text = radio('xfer-fmt') === 'text';
+    $<HTMLSelectElement>('xfer-recfm').value = text ? 'F' : 'U';
+    $<HTMLInputElement>('xfer-lrecl').value = text ? '80' : '';
+    $<HTMLInputElement>('xfer-blksize').value = text ? '3120' : '6144';
+  };
+  const mode = (): void => {
+    const up = radio('xfer-dir') === 'upload';
+    $('xfer-title').textContent = up ? 'Upload a file to MVS' : 'Download a data set';
+    $('xfer-file-row').hidden = !up; $('xfer-dcb').hidden = !up;
+    go.textContent = up ? 'Upload' : 'Download';
+  };
+  const open = (dir: 'download' | 'upload'): void => {
+    form.querySelector<HTMLInputElement>(`input[name="xfer-dir"][value="${dir}"]`)!.checked = true;
+    mode(); if (!xfer.busy) say('');
+    const t = xferTab();
+    if (!t) say('TSO is not up yet: wait for the TSO tab and log on first.', 'err');
+    else if (!atReady(t.view!.text())) say('Log on to TSO and get to READY first (the page types the command there).');
+    d.showModal();
+  };
+  for (const n of ['xfer-dir']) form.querySelectorAll<HTMLInputElement>(`input[name="${n}"]`).forEach((i) => i.addEventListener('change', mode));
+  form.querySelectorAll<HTMLInputElement>('input[name="xfer-fmt"]').forEach((i) => i.addEventListener('change', dcbDefaults));
+  $('download-btn').addEventListener('click', () => open('download'));
+  $('upload-btn').addEventListener('click', () => open('upload'));
+  close.addEventListener('click', () => { if (xfer.busy && xfer.cancel) { xfer.cancel(); say('Canceling ...'); } else d.close(); });
+  d.addEventListener('close', () => focusTerminal());
+  form.addEventListener('submit', (e) => {
+    e.preventDefault();
+    if (xfer.busy) return;
+    const up = radio('xfer-dir') === 'upload', format = radio('xfer-fmt') as 'text' | 'binary';
+    const dsn = $<HTMLInputElement>('xfer-dsn').value;
+    const num = (id: string): number | undefined => { const n = Number($<HTMLInputElement>(id).value); return Number.isFinite(n) && n > 0 ? Math.floor(n) : undefined; };
+    void (async () => {
+      let data: Uint8Array | undefined;
+      if (up) {
+        const f = fileIn.files?.[0];
+        if (!f) { say('Choose a file to upload.', 'err'); return; }
+        data = new Uint8Array(await f.arrayBuffer());
+      }
+      go.disabled = true; close.textContent = 'Cancel';
+      say(up ? 'Starting the upload on the TSO tab ...' : 'Starting the download on the TSO tab ...');
+      const lrecl = num('xfer-lrecl'), blksize = num('xfer-blksize'), tracks = num('xfer-tracks');
+      const o: XferOptions = { direction: up ? 'upload' : 'download', dsn, format,
+        ...(up ? { data, recfm: $<HTMLSelectElement>('xfer-recfm').value as 'F' | 'V' | 'U', ...(lrecl ? { lrecl } : {}), ...(blksize ? { blksize } : {}), ...(tracks ? { tracks } : {}) } : {}) };
+      const total = data?.length;
+      const r = await transfer(o, (b) => say(`${up ? 'Uploading' : 'Downloading'} ... ${(b / 1024).toFixed(1)} KB${total ? ` of ${(total / 1024).toFixed(1)} KB` : ''}`));
+      go.disabled = false; close.textContent = 'Close';
+      if (!r.ok) { say(r.error ?? 'The transfer failed.', 'err'); return; }
+      if (up) say(`Uploaded ${r.bytes} bytes to ${dsn.trim().toUpperCase().replace(/^'|'$/g, '')}.`, 'ok');
+      else { const name = localName(dsn, format); saveFile(name, r.data ?? new Uint8Array(0), format); say(`Downloaded ${r.bytes} bytes as ${name}.`, 'ok'); }
+    })();
+  });
+}
+
 async function shutdown(): Promise<void> {
   if (!operator || operator.shuttingDown || herculesStopped) return;
   (document.activeElement as HTMLElement | null)?.blur?.();
@@ -607,7 +702,7 @@ async function boot(): Promise<void> {
     throw new Error(EMBED ? 'this browser cannot run MVS inside the post (it needs desktop Chrome or Edge 137+). Open the full site instead'
       : 'this browser did not enable cross-origin isolation (SharedArrayBuffer is needed)');
   }
-  setupDebug(); setupAbout(); buildKeypad(); wireCapture(); setupHistory();
+  setupDebug(); setupAbout(); buildKeypad(); wireCapture(); setupHistory(); setupTransfer();
   $('add-tso').addEventListener('click', () => { const t = addTso(); userPicked = true; select(t.id); void connectTso(t); });
   machine.onLog((l, historic) => {
     hercLines.push([performance.now(), l]);
@@ -910,6 +1005,15 @@ Object.assign(window, {
     /** save state now + what the page did about it (indicator, flush requests, beforeunload prompts, dirty windows). */
     saving: () => (machine.persist?.info()?.enabled ? { ...machine.persist.saveState(), shown: $('save-status').hidden ? '' : $('save-status').textContent, ...saveInfo, flushes: saveInfo.flushes.slice(-10), windows: saveInfo.windows.slice() } : null),
     hcmd: (c: string) => machine.command(c),
+    /** IND$FILE transfer as the dialog runs it; data in and out as base64 (tests). */
+    transfer: async (o: Omit<XferOptions, 'data'> & { b64?: string }): Promise<XferResult & { b64?: string }> => {
+      const { b64, ...rest } = o;
+      const data = b64 !== undefined ? Uint8Array.from(atob(b64), (c) => c.charCodeAt(0)) : undefined;
+      const r = await transfer({ ...rest, ...(data ? { data } : {}) });
+      let out = ''; if (r.data) for (let i = 0; i < r.data.length; i += 0x8000) out += String.fromCharCode(...r.data.subarray(i, i + 0x8000));
+      return { ok: r.ok, bytes: r.bytes, ...(r.error ? { error: r.error } : {}), ...(r.command ? { command: r.command } : {}), ...(r.data ? { b64: btoa(out) } : {}) };
+    },
+    xferLast: () => xfer.last,
     shadows: async () => (await machine.persist?.shadows()) ?? [],
     /** base64 of one shadow file (tests; only while Hercules is stopped). */
     shadowB64: async (name: string): Promise<string> => {

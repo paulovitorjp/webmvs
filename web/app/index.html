@@ -87,6 +87,8 @@ window.coi = { doReload: function () {
     <span class="tools">
       <button id="kbd-btn" class="tool" title="Show the on-screen keyboard (mobile)">Kbd</button>
       <button id="keys-btn" class="tool" title="3270 keys (Enter, Clear, PA, PF)">Keys</button>
+      <button id="download-btn" class="tool more" title="Download a data set to this computer (IND$FILE, from TSO READY)">Download</button>
+      <button id="upload-btn" class="tool more" title="Upload a file from this computer into a data set (IND$FILE, from TSO READY)">Upload</button>
       <button id="history-btn" class="tool more" title="Console history: the master console messages of this machine, also from before the last resume">History</button>
       <button id="fresh-btn" class="tool more" title="Discard the saved machine and start MVS again with an IPL (your disks are kept)" hidden>Start fresh (IPL)</button>
       <button id="shutdown-top" class="tool more" title="Shut down MVS cleanly (JES2 stop, Z EOD, QUIESCE), so that the saved disks are consistent" hidden>Shut down</button>
@@ -130,6 +132,8 @@ window.coi = { doReload: function () {
     (try transaction <b>INQ1</b> with customer <b>400001</b>; leave with Clear, <b>KSSF</b>).
     <b>CARDDEMO</b> starts the CardDemo credit card application: sign on as <b>USER0001</b> (or the administrator
     <b>ADMIN001</b>), password <b>PASSWORD</b>.</p>
+  <p><b>Download</b> and <b>Upload</b> copy data sets between MVS and this computer with IND$FILE: log on, stay at
+    <b>READY</b>, and the page types the command for you.</p>
   <table class="keys">
     <tr><td>Enter</td><td>Enter</td><td>Esc</td><td>Clear</td></tr>
     <tr><td>F1-F12, Shift+F1-F12</td><td>PF1-PF24</td><td>Ctrl+1 / 2 / 3</td><td>PA1 / PA2 / PA3</td></tr>
@@ -147,6 +151,7 @@ window.coi = { doReload: function () {
     <li><a href="https://github.com/aws-samples/aws-mainframe-modernization-carddemo">CardDemo</a>, Copyright Amazon.com, Inc. or its
       affiliates, Apache-2.0 (<a href="./carddemo/LICENSE.txt">license</a>, <a href="./carddemo/NOTICE.txt">notice</a>). Modified:
       converted to ANS COBOL for MVS 3.8J and KICKS; part of the application is included.</li>
+    <li>IND$FILE 2.0.5 (3270 file transfer, used by Download and Upload) by Mike Rayborn, from the MVS/CE package manager.</li>
     <li>Based on the MVS 3.8J sysgen by <a href="https://www.jaymoseley.com/hercules/">Jay Moseley</a>. MVS 3.8J is public domain.</li>
     <li>3270 terminal: <a href="https://github.com/athornton/tn3270">athornton/tn3270</a>, MIT license.</li>
     <li>3270 font: x3270 3270 font (Paul Mattes, Jeff Sparkes, GTRC), see <a href="./LICENSE-3270-font.txt">license</a>.</li>
@@ -161,7 +166,8 @@ window.coi = { doReload: function () {
   <p>TSO user: <b>MVSCE02</b>, password <b>PASS4U</b>. At <b>READY</b>, <b>KICKS</b> starts KICKS for TSO
     (try transaction <b>INQ1</b> with customer <b>400001</b>; leave with Clear, <b>KSSF</b>).
     <b>CARDDEMO</b> starts CardDemo: sign on as <b>USER0001</b> (or the administrator <b>ADMIN001</b>), password <b>PASSWORD</b>.</p>
-  <p>Tap the terminal to type. <b>Keys</b> shows or hides the 3270 keys (Enter, Clear, PA, PF).</p>
+  <p>Tap the terminal to type. <b>Keys</b> shows or hides the 3270 keys (Enter, Clear, PA, PF).
+    <b>Download</b> and <b>Upload</b> (in the &#8943; menu) copy data sets to and from this device, from TSO <b>READY</b>.</p>
   <p class="actions"><span></span><button class="sheet-close" autofocus>Close</button></p>
 </dialog>
 <dialog id="info-dialog" class="sheet">
@@ -176,6 +182,35 @@ window.coi = { doReload: function () {
 <dialog id="more-dialog" class="sheet">
   <div id="more-items"></div>
   <p class="actions"><span></span><button class="sheet-close" autofocus>Close</button></p>
+</dialog>
+<dialog id="xfer-dialog" class="sheet">
+  <form id="xfer-form" method="dialog">
+    <h2><span id="xfer-title">Download a data set</span></h2>
+    <p class="xfer-mode" role="radiogroup" aria-label="Direction">
+      <label><input type="radio" name="xfer-dir" value="download" checked> Download</label>
+      <label><input type="radio" name="xfer-dir" value="upload"> Upload</label>
+    </p>
+    <p><label>Data set <input id="xfer-dsn" autocomplete="off" spellcheck="false" autocapitalize="characters" placeholder="SYS1.PARMLIB(IEASYS00)"></label></p>
+    <p id="xfer-file-row" hidden><label>File <input id="xfer-file" type="file"></label></p>
+    <p class="xfer-fmt" role="radiogroup" aria-label="Format">Format
+      <label title="ASCII on this computer, EBCDIC on MVS; lines end with CR LF here"><input type="radio" name="xfer-fmt" value="text" checked> Text</label>
+      <label title="the bytes as they are, no translation"><input type="radio" name="xfer-fmt" value="binary"> Binary</label>
+    </p>
+    <details id="xfer-dcb" hidden>
+      <summary>New data set attributes</summary>
+      <p class="xfer-dcb">
+        <label>RECFM <select id="xfer-recfm"><option value="F">FB</option><option value="V">VB</option><option value="U">U</option></select></label>
+        <label>LRECL <input id="xfer-lrecl" type="number" min="1" max="32760" value="80"></label>
+        <label>BLKSIZE <input id="xfer-blksize" type="number" min="1" max="32760" value="3120"></label>
+        <label>Tracks <input id="xfer-tracks" type="number" min="1" max="9999" placeholder="auto"></label>
+      </p>
+    </details>
+    <p id="xfer-help" class="xfer-help">Works from the TSO tab at <b>READY</b>: the page types the <b>IND$FILE</b> command for you.
+      Names are fully qualified (MVSCE02.MY.DATA). An upload into a member needs an existing library; a new
+      data set is created, an existing one is replaced.</p>
+    <p id="xfer-status" role="status" aria-live="polite"></p>
+    <p class="actions"><button id="xfer-cancel" type="button">Close</button> <button id="xfer-go" type="submit">Download</button></p>
+  </form>
 </dialog>
 <dialog id="reset-dialog">
   <h2>Reset machine?</h2>

@@ -3,7 +3,7 @@
 # Browser build driver: Hyperion extpkgs, hercules.wasm, lazy DASD chunks and the seed shadow.
 # Then make the deployable site with scripts/bundle.sh (see README.md and docs/DEPLOY.md).
 #
-# Usage: scripts/build.sh ext | build | kicks | carddemo | chunks | seed | all
+# Usage: scripts/build.sh ext | build | kicks | carddemo | indfile | chunks | seed | all
 # Env: PACKS (default 0 = no DASD boot packs, scripts/dasd-packs.py), META (l2delta | none),
 #      LCL400_KEEP (default 4: SYS1.VTAMLST(LCL400) trimmed to the 4 terminals of web.cnf),
 #      VTAMLIB_STUB (default 1: SYS1.VTAMLIB IEDIAE/IEDIAK stub, applied by 'kicks' before the install),
@@ -31,6 +31,7 @@ CARDDEMO_COMMIT=59cc6c2fd7ebd7ef7925cad552a01a4b8b6e4d5e
 CARDDEMO_SHA256=a22c114ba79df73f86578495fbceb4062ae53e0cb335f5d2950598caf011684f
 CARDDEMO_URL=https://codeload.github.com/aws-samples/aws-mainframe-modernization-carddemo/tar.gz/$CARDDEMO_COMMIT
 CV=$B/carddemo/out   # mvsres.3350, mvs000.3350 (CardDemo install changes on top of KICKS) and cardd0.3350
+IV=$B/indfile/out    # mvs000.3350 with IND$FILE in SYS2.CMDLIB (on top of the CardDemo install)
 mkdir -p "$B" "$L"
 case "${1:-}" in
 ext)
@@ -77,6 +78,14 @@ carddemo)   # CardDemo on CARDD0 (0352), on the KICKS volumes: $B/carddemo/out
   # KICKS0 ships from the KICKS install: the CardDemo install must not change it
   [ $rc = 0 ] && { cmp -s "$KV/kicks0.3350" "$C/MVSCE/DASD/kicks0.3350" || { echo "the install changed kicks0.3350"; rc=1; }; }
   [ $rc = 0 ] && rm -rf "$C/MVSCE" "$C/src"; echo "carddemo rc=$rc"; exit $rc ;;
+indfile)   # IND$FILE 2.0.5 (3270 file transfer) from the release's MVP package into SYS2.CMDLIB: $B/indfile/out
+  [ -f "$CV/cardd0.3350" ] || { echo "no $CV/cardd0.3350: run scripts/build.sh carddemo first"; exit 1; }
+  I=$B/indfile; rm -rf "$I/MVSCE" "$IV"; mkdir -p "$I"; tar -xf "$TAR" -C "$I" MVSCE || exit 1
+  cp "$KV/kicks0.3350" "$CV"/*.3350 "$I/MVSCE/DASD/"
+  sed -i 's|^0253    3350    DASD/syscpk.3350$|&\n0351    3350    DASD/kicks0.3350\n0352    3350    DASD/cardd0.3350|' "$I/MVSCE/conf/local.cnf"
+  grep -q '^0352 ' "$I/MVSCE/conf/local.cnf" || { echo "no 0352 line in local.cnf"; exit 1; }
+  python3 "$REPO/scripts/indfile-install.py" --mvsce "$I/MVSCE" --out "$IV" --herc "$HERC" --base "$CV" > "$L/indfile.log" 2>&1
+  rc=$?; grep -v '^HHC' "$L/indfile.log"; [ $rc = 0 ] && rm -rf "$I/MVSCE"; echo "indfile rc=$rc"; exit $rc ;;
 chunks)  # lazy chunks (dasd-chunk.py) with the LCL400 trim and the VTAMLIB stub
   # boot list = native trace + 6 browser traces (dasd/manifest/browser-boot, copied to $B/boot)
   mkdir -p "$B/boot"; [ -n "$(ls "$B/boot" 2>/dev/null)" ] || cp "$REPO/dasd/manifest/browser-boot/"*.csv "$B/boot/"
@@ -88,9 +97,11 @@ chunks)  # lazy chunks (dasd-chunk.py) with the LCL400 trim and the VTAMLIB stub
   BOOT=$BOOT,$REPO/dasd/manifest/kicks0/boot-tracks.csv,$REPO/dasd/manifest/cardd0/boot-tracks.csv
   [ -f "$KV/kicks0.3350" ] || { echo "no $KV/kicks0.3350: run scripts/build.sh kicks first"; exit 1; }
   [ -f "$CV/cardd0.3350" ] || { echo "no $CV/cardd0.3350: run scripts/build.sh carddemo first"; exit 1; }
-  # volumes: the release tar, with KICKS0 from the KICKS install, MVSRES, MVS000 and CARDD0 from the CardDemo install
+  [ -f "$IV/mvs000.3350" ] || { echo "no $IV/mvs000.3350: run scripts/build.sh indfile first"; exit 1; }
+  # volumes: the release tar, with KICKS0 from the KICKS install, MVSRES and CARDD0 from the CardDemo install,
+  # MVS000 from the IND$FILE install (CardDemo's MVS000 plus SYS2.CMDLIB(IND$FILE))
   V=$B/vols; rm -rf "$V"; mkdir -p "$V"; tar -xf "$TAR" -C "$V" --strip-components=2 --wildcards 'MVSCE/DASD/*' || exit 1
-  cp "$KV"/*.3350 "$V/"; cp "$CV"/*.3350 "$V/"
+  cp "$KV"/*.3350 "$V/"; cp "$CV"/*.3350 "$V/"; cp "$IV/mvs000.3350" "$V/"
   rm -rf "$B/dasd"
   STUB=()   # VTAMLIB stub: already in the KICKS install's mvsres (scripts/build.sh kicks), kept by carddemo
   python3 "$REPO/scripts/dasd-chunk.py" --cnf "$REPO/conf/web.cnf" --voldir "$V" --boot "$BOOT" \
@@ -112,6 +123,6 @@ j = {'format': 1, 'what': 'seed shadow files: copied into the OPFS shadow dir wh
 json.dump(j, open(os.path.join(d, 'seed.json'), 'w'), indent=1); print(json.dumps(j['files'][0]))
 EOF
   ;;
-all) "$0" ext && "$0" build && "$0" kicks && "$0" carddemo && "$0" chunks && "$0" seed ;;
-*) echo "usage: $0 ext|build|kicks|carddemo|chunks|seed|all"; exit 2 ;;
+all) "$0" ext && "$0" build && "$0" kicks && "$0" carddemo && "$0" indfile && "$0" chunks && "$0" seed ;;
+*) echo "usage: $0 ext|build|kicks|carddemo|indfile|chunks|seed|all"; exit 2 ;;
 esac

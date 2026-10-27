@@ -141,3 +141,17 @@ dialog.sheet p { margin: 0 0 10px; }
   .padrow button, .padrow button.wide, .padrow.pf button { min-width: 0; padding: 8px 0; font-size: 11px; }
 }
 @media (max-width: 480px) { .brand { display: none; } }
+
+/* file transfer (Download / Upload, IND$FILE) */
+#xfer-dialog form { display: flex; flex-direction: column; gap: 2px; min-width: min(440px, 88vw); }
+#xfer-dialog h2 { margin: 0 0 8px; }
+#xfer-dialog label { margin-right: 12px; }
+#xfer-dsn { width: 100%; box-sizing: border-box; margin-top: 4px; font: 14px ui-monospace, monospace; text-transform: uppercase; padding: 6px; }
+#xfer-file { display: block; margin-top: 4px; max-width: 100%; }
+.xfer-dcb { display: flex; flex-wrap: wrap; gap: 6px 10px; }
+.xfer-dcb input { width: 6em; }
+.xfer-help { color: var(--dim); font-size: 12px; }
+#xfer-status { min-height: 1.3em; font-size: 13px; }
+#xfer-status.err { color: #f77; }
+#xfer-status.ok { color: var(--green, #4f4); }
+#xfer-dialog .actions { display: flex; justify-content: flex-end; gap: 8px; }

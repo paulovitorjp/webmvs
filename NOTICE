@@ -38,6 +38,11 @@ Jay Moseley's MVS 3.8J sysgen procedures
   https://www.jaymoseley.com/hercules/
   The basis of MVS/CE.
 
+IND$FILE 2.0.5 (3270 file transfer for TSO)
+  Copyright (c) Mike Rayborn. Free software ("use at your own risk"), distributed with the package
+  manager of MVS/CE (MVP/packages/IND$FILE in the MVS/CE release). scripts/build.sh indfile installs it
+  unmodified in SYS2.CMDLIB of the MVS000 volume. No IND$FILE file is in this repository.
+
 KICKS for TSO 1.5.0
   http://www.kicksfortso.com/
   Copyright (c) Mike Noel. Used under the KICKS license (kicks-license.txt in the distribution zip).
