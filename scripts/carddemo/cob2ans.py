@@ -99,7 +99,7 @@ def expand_copies(lines, cpydirs, keep, depth=0):
 
 
 # ---------------------------------------------------------------- tokens
-TOK = re.compile(r"""\s*(?:('(?:[^']|'')*')|("(?:[^"]|"")*")|(==)|(\.)(?=\s|$)|([(),:])|(>=|<=|[<>=+*/])|([A-Z0-9][A-Z0-9-]*(?:\.[0-9A-Z]+)?|-?[0-9]+(?:\.[0-9]+)?|[A-Z0-9-]+))""", re.I)
+TOK = re.compile(r"""\s*(?:('(?:[^']|'')*')|("(?:[^"]|"")*")|(==)|(\.)(?=\s|$)|([(),:])|(>=|<=|[<>=+*/])|([A-Z0-9][A-Z0-9-]*(?:\.[0-9A-Z]+)?|-?[0-9]+(?:\.[0-9]+)?|[-+][A-Z0-9-]+\.[0-9A-Z]+(?=\.?(?:\s|$))|[A-Z0-9-]+))""", re.I)
 
 
 class T(str):
@@ -816,7 +816,7 @@ class Gen:
             if 'RESP' in b:
                 i = b.index('RESP'); j, r = self.ref(b, i + 2)
                 return [f'MOVE 0 TO {self.text(r)}']
-            return []
+            return ['MOVE 0 TO EIBRESP']     # NOHANDLE: the program tests EIBRESP (COMEN01C)
         # LENGTH OF inside EXEC -> literal; refmod inside EXEC args -> not handled
         out, k = [], 0
         while k < len(b):

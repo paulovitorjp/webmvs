@@ -2,11 +2,13 @@
 """Source changes for CardDemo programs before scripts/carddemo/cob2ans.py converts them: (old text, new text[, n])
 tuples; old must match exactly n times (default 1) in the program after COPY members are expanded, or functions of
 the program text."""
+import dlivsam
 import sqlvsam
 
 # programs of this port (online menu options that run); the other menu options say "not available in this version"
 PORTED = {'COACTVWC', 'COCRDLIC', 'COCRDSLC', 'COTRN00C', 'COTRN01C', 'COUSR00C', 'COUSR01C', 'COUSR02C', 'COUSR03C',
-          'COTRN02C', 'COBIL00C', 'COACTUPC', 'COCRDUPC', 'CORPT00C', 'COTRTLIC', 'COTRTUPC'}
+          'COTRN02C', 'COBIL00C', 'COACTUPC', 'COCRDUPC', 'CORPT00C', 'COTRTLIC', 'COTRTUPC', 'COPAUS0C',
+          'COPAUS1C', 'COPAUS2C'}
 NOT_AVAILABLE = 'is not available in this version'
 
 ABEND = ("CALL 'CEE3ABD' USING ABCODE, TIMING.", "STOP RUN.")
@@ -213,6 +215,10 @@ FIXES = {
                   "25 WS-TYPE-CD-DELETE-KEY PIC X(02).\n25 FILLER PIC X(01).\n25 FILLER PIC X(01).")],
     'COTRTUPC': [sqlvsam.to_vsam, ('10 WS-EDIT-DATE-X REDEFINES WS-EDIT-DATE-X PIC 9(10).',
                                    '10 WS-EDIT-DATE-X9 REDEFINES WS-EDIT-DATE-X PIC 9(10).')],
+    # pending authorizations: IMS and Db2 upstream, VSAM files here (dlivsam.py); COPAUS1C looks the decline reason
+    # up in a table of 10 with a loop (SEARCH ALL)
+    'COPAUS0C': [dlivsam.to_vsam], 'COPAUS1C': [dlivsam.to_vsam, (dlivsam.SEARCH_OLD, dlivsam.SEARCH_NEW)],
+    'COPAUS2C': [dlivsam.frds_to_vsam],
     # sign-on screen after a key it does not take: the cursor goes back to the User ID field, and the message is
     # only for Clear, PA1, PA3 and the PF keys: the browser terminal sends PA2 (redisplay) when KICKS starts
     # KICKS: one FORMATTIME per format (the date with DATESEP, then the time with TIMESEP)

@@ -13,7 +13,7 @@
 //   --expect-upgrade   the runtime removed the shadows of the changed volumes (persist.upgrade) and the page
 //                      shows the update notice
 //   --carddemo   after KICKS: CARDDEMO, sign on USER0001, account 00000000001 (Immanuel Kessler), a menu option
-//                that is not included ('not available'), bill payment of account 00000000001, PF3 to the sign-on
+//                pending authorizations of 00000000013 (PF5 on the first marks it as fraud or not), bill payment of account 00000000001, PF3 to the sign-on
 //                screen, PF3, KSSF; a card update, a transaction report (REVIEW shows it at READY); then ADMIN001
 //                adds user A0WEBMVS and the user list shows it, adds transaction type 50 and deletes it in the list;
 //                --carddemo-only: the same without the KICKS samples
@@ -253,10 +253,37 @@ try {
     await shot('carddemo-account');
     await key('F3');
     t = await waitText(/Main Menu/, 30000, 'main menu again');
+    // pending authorizations (IMS and Db2 upstream, VSAM here): account 00000000013, S on the first one shows it,
+    // PF5 marks it as fraud or takes the mark away (the detail is rewritten), and showing it again reads it back
     await typeLine('11');
-    t = await waitText(/not available in this version/, 30000, 'not available message');
-    check('CardDemo: an option that is not included says so', true, t.split('\n').filter((l) => /not available/.test(l)).map((l) => l.trim()));
-    await shot('carddemo-not-available');
+    t = await waitText(/View Authorizations/, 30000, 'pending authorizations screen');
+    await unlocked(); await page.keyboard.type('00000000013', { delay: 20 }); await page.keyboard.press('Enter');
+    t = await waitText(/Approval #/, 30000, 'authorizations of account 00000000013');
+    await sleep(1000); t = await text();
+    const authRows = t.split('\n').filter((l) => /\d\d\/\d\d\/\d\d +\d\d:\d\d:\d\d/.test(l));
+    check('CardDemo: pending authorizations of account 00000000013 listed', authRows.length >= 5, authRows.slice(0, 2).map((l) => l.trim()));
+    await shot('carddemo-authorizations');
+    const fraudOf = (s) => ((s.match(/Fraud Status: *(\S*)/) || [])[1] || '');
+    const showFirst = async (what) => {
+      await key('Home'); await key('Tab'); await page.keyboard.type('S', { delay: 20 }); await page.keyboard.press('Enter');
+      return waitText(/View Authorization Details/, 30000, what);
+    };
+    t = await showFirst('authorization details');
+    const fraudBefore = fraudOf(t);
+    await key('F5');
+    t = await waitText(/Fraud Status: *\S/, 30000, 'fraud status after PF5');
+    await sleep(1000); t = await text();
+    const fraudAfter = fraudOf(t);
+    await shot('carddemo-authorization-fraud');
+    await key('F3');
+    t = await waitText(/View Authorizations/, 30000, 'authorizations again');
+    t = await showFirst('authorization details again');
+    check('CardDemo: authorization fraud mark saved (PF5, shown again)', fraudAfter !== fraudBefore && fraudOf(t) === fraudAfter,
+      { before: fraudBefore, after: fraudAfter, again: fraudOf(t) });
+    await key('F3');
+    t = await waitText(/View Authorizations/, 30000, 'authorizations list');
+    await key('F3');
+    t = await waitText(/Main Menu/, 30000, 'main menu after authorizations');
     // bill payment (a write): account 00000000001 pays its balance, then the account shows 0
     await typeLine('10');
     t = await waitText(/Bill Payment/i, 30000, 'bill payment screen');

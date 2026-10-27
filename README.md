@@ -92,6 +92,7 @@ What works (the original programs, converted):
 | main menu | 8 Transaction Add | COTRN02C | account or card number, the transaction fields, `Y` to confirm |
 | main menu | 9 Transaction Reports | CORPT00C | `X` on Monthly, Yearly or Custom (start and end date), `Y` submits the report job |
 | main menu | 10 Bill Payment | COBIL00C | account number, `Y` pays the whole balance (it adds a payment transaction) |
+| main menu | 11 Pending Authorization View | COPAUS0C, COPAUS1C | account number (e.g. `00000000013`), `S` on one shows it, PF5 marks it as fraud or not, PF8 next |
 | admin menu | | COADM01C | |
 | admin menu | 1 User List | COUSR00C | PF7/PF8 page, `U` or `D` on a line updates or deletes that user |
 | admin menu | 2 User Add | COUSR01C | |
@@ -124,12 +125,22 @@ Transaction types: the two admin options use Db2 in the original. Here the types
 commands (`scripts/carddemo/sqlvsam.py`). As with Db2, a type that has categories (in
 `CARDDEMO.TRANCATG.KSDS`) cannot be deleted; a type you add can. The description filter ignores capitals.
 
+Pending authorizations: the original keeps them in the IMS database DBPAUTP0 (a summary segment per account
+with its authorization details) and the fraud reports in the Db2 table AUTHFRDS; MVS 3.8J has neither. Here
+they are the VSAM files `CARDDEMO.PAUTSUM.KSDS` (the summaries, key the packed account number),
+`CARDDEMO.PAUTDTL.KSDS` (account number and detail, key account number and the complemented date and time,
+so the newest comes first, as in IMS) and `CARDDEMO.AUTHFRDS.KSDS`, loaded from the sample IMS unload file.
+Each `EXEC DLI` call becomes KICKS file commands that set the status code as IMS would, and the two SQL
+statements become a write and a rewrite (`scripts/carddemo/dlivsam.py`). Option 11 lists an account's
+authorizations (try `00000000013`), `S` on one shows it, PF5 marks it as fraud or takes the mark away, PF8
+shows the next one. Not included: the MQ part (the authorization request program COPAUA0C and its batch
+jobs), which needs IBM MQ.
+
 Batch: the file readers CBACT02C, CBACT03C and CBCUS01C are in `CARDDEMO.LOADLIB`; the job
 `CARDDEMO.JCL(READALL)` runs them (`SUBMIT 'CARDDEMO.JCL(READALL)'` at `READY`).
 
-Not in this version: pending authorizations (IMS, MQ) and the other batch jobs (they need SORT,
-Db2 or language features this COBOL does not have). Their menu options answer
-"... is not available in this version". The data files are read and written by the programs that work; your
+Not in this version: the MQ parts of CardDemo and the batch jobs that need SORT, Db2 or IMS batch (or language
+features this COBOL does not have). The data files are read and written by the programs that work; your
 changes stay in your browser like the rest of the system. When a new version of webmvs changes the CardDemo
 volume, it starts again from its original data (the update notice says so; your own data sets are kept).
 
@@ -287,7 +298,7 @@ Each bundle has `LICENSE`, `NOTICE` and the QPL text in its `source/` folder (an
 | [MVS/CE](https://github.com/MVS-sysgen/sysgen) v3.0.0 (MVS-sysgen project) | see its repository | the DASD volumes are built from its release; the sysgen automates Jay Moseley's procedures |
 | [Jay Moseley's MVS 3.8J sysgen](https://www.jaymoseley.com/hercules/) | | the basis of MVS/CE |
 | [KICKS for TSO](http://www.kicksfortso.com/) 1.5.0 (Mike Noel) | KICKS license (`kicks-license.txt`; free use, redistribution of the complete package only) | installed on the KICKS0 volume by `scripts/build.sh kicks`; the site offers the unmodified zip in `/kicks/` |
-| [CardDemo](https://github.com/aws-samples/aws-mainframe-modernization-carddemo) (Copyright Amazon.com, Inc. or its affiliates) | Apache-2.0 | modified (converted to ANS COBOL for KICKS, the Db2 programs on VSAM, the report job without DFSORT) and installed on the CARDD0 volume by `scripts/build.sh carddemo` |
+| [CardDemo](https://github.com/aws-samples/aws-mainframe-modernization-carddemo) (Copyright Amazon.com, Inc. or its affiliates) | Apache-2.0 | modified (converted to ANS COBOL for KICKS, the Db2 and IMS programs on VSAM, the report job without DFSORT) and installed on the CARDD0 volume by `scripts/build.sh carddemo` |
 | IND$FILE 2.0.5 (Mike Rayborn) | free, use at your own risk (its README); distributed with MVS/CE's package manager | installed in `SYS2.CMDLIB` from the MVS/CE release by `scripts/build.sh indfile` |
 | [athornton/tn3270](https://github.com/athornton/tn3270) (Adam Thornton) | MIT | `web/vendor/tn3270/LICENSE` |
 | 3270 font (x3270 BDF font, Paul Mattes, Jeff Sparkes, GTRC) | BSD-style | `web/vendor/tn3270/packages/canvas/assets/LICENSE-3270-font.txt`; see also [rbanffy/3270font](https://github.com/rbanffy/3270font) |

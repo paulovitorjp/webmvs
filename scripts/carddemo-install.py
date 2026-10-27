@@ -27,7 +27,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 _spec = importlib.util.spec_from_file_location('kicks_install', os.path.join(HERE, 'kicks-install.py'))
 ki = importlib.util.module_from_spec(_spec); _spec.loader.exec_module(ki)
 sys.path.insert(0, os.path.join(HERE, 'carddemo'))
-import cob2ans, fixes  # noqa: E402
+import cob2ans, fixes, dlivsam  # noqa: E402
 
 JOBCARD = "//{name:<8} JOB (1),'CARDDEMO',CLASS=A,MSGCLASS=A,MSGLEVEL=(1,1),\n//         REGION=4096K,USER=IBMUSER,PASSWORD=SYS1\n"
 VOL = 'CARDD0'
@@ -51,15 +51,20 @@ KFILES = [('ACCTDAT', 'CARDDEMO.ACCTDATA.KSDS', None), ('CARDDAT', 'CARDDEMO.CAR
           ('CARDAIX', 'CARDDEMO.CARDDATA.PATH', 'CARDDAT'), ('CCXREF', 'CARDDEMO.CARDXREF.KSDS', None),
           ('CXACAIX', 'CARDDEMO.CARDXREF.PATH', 'CCXREF'), ('CUSTDAT', 'CARDDEMO.CUSTDATA.KSDS', None),
           ('TRANSACT', 'CARDDEMO.TRANSACT.KSDS', None), ('USRSEC', 'CARDDEMO.USRSEC.KSDS', None),
-          ('TRANTYPE', 'CARDDEMO.TRANTYPE.KSDS', None), ('TRANCATG', 'CARDDEMO.TRANCATG.KSDS', None)]
+          ('TRANTYPE', 'CARDDEMO.TRANTYPE.KSDS', None), ('TRANCATG', 'CARDDEMO.TRANCATG.KSDS', None),
+          ('PAUTSUM', 'CARDDEMO.PAUTSUM.KSDS', None), ('PAUTDTL', 'CARDDEMO.PAUTDTL.KSDS', None),
+          ('AUTHFRDS', 'CARDDEMO.AUTHFRDS.KSDS', None)]
 # online programs and their transactions (CardDemo CSD); MAPS: mapsets
 ONLINE = [('COSGN00C', 'CC00'), ('COMEN01C', 'CM00'), ('COADM01C', 'CA00'), ('COACTVWC', 'CAVW'),
           ('COCRDLIC', 'CCLI'), ('COCRDSLC', 'CCDL'), ('COUSR00C', 'CU00'), ('COTRN00C', 'CT00'), ('COTRN01C', 'CT01'),
           ('COUSR01C', 'CU01'), ('COUSR02C', 'CU02'), ('COUSR03C', 'CU03'), ('COTRN02C', 'CT02'), ('COBIL00C', 'CB00'),
-          ('COACTUPC', 'CAUP'), ('COCRDUPC', 'CCUP'), ('CORPT00C', 'CR00'), ('COTRTLIC', 'CTLI'), ('COTRTUPC', 'CTTU')]
+          ('COACTUPC', 'CAUP'), ('COCRDUPC', 'CCUP'), ('CORPT00C', 'CR00'), ('COTRTLIC', 'CTLI'), ('COTRTUPC', 'CTTU'),
+          ('COPAUS0C', 'CPVS'), ('COPAUS1C', 'CPVD'), ('COPAUS2C', None)]
 # programs outside app/cbl: their directory (cbl, cpy, bms, cpy-bms under it); the transaction type programs use
 # Db2 upstream, here the TRANTYPE file (carddemo/sqlvsam.py)
-APPDIR = {'COTRTLIC': 'app/app-transaction-type-db2', 'COTRTUPC': 'app/app-transaction-type-db2'}
+APPDIR = {'COTRTLIC': 'app/app-transaction-type-db2', 'COTRTUPC': 'app/app-transaction-type-db2',
+          'COPAUS0C': 'app/app-authorization-ims-db2-mq', 'COPAUS1C': 'app/app-authorization-ims-db2-mq',
+          'COPAUS2C': 'app/app-authorization-ims-db2-mq'}
 APPDIRS = ['app'] + sorted(set(APPDIR.values()))
 
 
@@ -72,7 +77,7 @@ def app_file(src, kind, name):
 OTHER_TRANS = []
 BATCH = ['CBACT02C', 'CBACT03C', 'CBCUS01C', 'CBTRN03C']
 # batch programs of this port (scripts/carddemo/helpers): CDTRFLT selects transactions by date for the report job
-TOOLS = ['CDTRFLT']
+TOOLS = ['CDTRFLT', 'CDUNHEX']
 READALL = """//READALL  JOB (1),'CARDDEMO',CLASS=A,MSGCLASS=A,MSGLEVEL=(1,1)
 //* CardDemo batch readers: list the card, card xref and customer files
 //ACCT    EXEC PGM=CBACT02C
@@ -352,25 +357,20 @@ def stack_steps(rl, n, deck):
 """ + '\n'.join(deck) + "\n@@\n"
 
 
-def job_data(src):
-    jobs = []
-    for name, rl, kl, ko, f, aix in FILES:
-        dsn = f'CARDDEMO.{name}.KSDS'
-        recs = data_lines(src, f, rl)
-        if name == 'TRANSACT':   # posted transactions: processing time = origin time (the sample has it blank)
-            recs = [r[:304] + r[278:304] + r[330:] if not r[304:330].strip() else r for r in recs]
-        n = (rl + 79) // 80
-        ctl = f""" DELETE {dsn} CLUSTER
+def define(name, rl, kl, ko, nrec, aix=None):
+    """IDCAMS statements: (re)define the KSDS CARDDEMO.name.KSDS (and its alternate index and path)"""
+    dsn = f'CARDDEMO.{name}.KSDS'
+    ctl = f""" DELETE {dsn} CLUSTER
  SET MAXCC = 0
  DEFINE CLUSTER (NAME({dsn}) -
-        VOLUMES({VOL}) TRACKS({max(2, len(recs) * rl // 15000 + 2)} 5) KEYS({kl} {ko}) -
+        VOLUMES({VOL}) TRACKS({max(2, nrec * rl // 15000 + 2)} 5) KEYS({kl} {ko}) -
         RECORDSIZE({rl} {rl}) SHAREOPTIONS(2 3) INDEXED) -
    DATA (NAME({dsn}.DATA)) -
    INDEX (NAME({dsn}.INDEX))
 """
-        if aix:
-            a = f'CARDDEMO.{name}.AIX'
-            ctl += f""" DEFINE ALTERNATEINDEX (NAME({a}) -
+    if aix:
+        a = f'CARDDEMO.{name}.AIX'
+        ctl += f""" DEFINE ALTERNATEINDEX (NAME({a}) -
         RELATE({dsn}) -
         KEYS({aix[0]} {aix[1]}) NONUNIQUEKEY UPGRADE -
         RECORDSIZE({aix[2]} {aix[2]}) VOLUMES({VOL}) TRACKS(5 5)) -
@@ -379,10 +379,21 @@ def job_data(src):
  DEFINE PATH (NAME(CARDDEMO.{name}.PATH) -
         PATHENTRY({a}))
 """
+    return ctl
+
+
+def job_data(src):
+    jobs = []
+    for name, rl, kl, ko, f, aix in FILES:
+        dsn = f'CARDDEMO.{name}.KSDS'
+        recs = data_lines(src, f, rl)
+        if name == 'TRANSACT':   # posted transactions: processing time = origin time (the sample has it blank)
+            recs = [r[:304] + r[278:304] + r[330:] if not r[304:330].strip() else r for r in recs]
+        n = (rl + 79) // 80
         j = JOBCARD.format(name='CDL' + name[:5]) + f"""//DEFINE  EXEC PGM=IDCAMS
 //SYSPRINT DD SYSOUT=*
 //SYSIN    DD *
-{ctl}/*
+{define(name, rl, kl, ko, len(recs), aix)}/*
 """ + stack_steps(rl, n, card_deck(recs, n)) + f"""//LOAD    EXEC PGM=IDCAMS
 //SYSPRINT DD SYSOUT=*
 //IN       DD DSN=&&RECS,DISP=(OLD,DELETE)
@@ -394,6 +405,83 @@ def job_data(src):
             j += ("//INDEX   EXEC PGM=IDCAMS\n//SYSPRINT DD SYSOUT=*\n//SYSIN    DD *\n"
                   f" BLDINDEX INDATASET({dsn}) -\n          OUTDATASET(CARDDEMO.{name}.AIX)\n/*\n")
         jobs.append((j, f'NUMBER OF RECORDS PROCESSED WAS {len(recs)}'))
+    return jobs
+
+
+def paut_records(src):
+    """the pending authorizations of the IMS unload file (DFSURGU0 format: a 2-byte length, then for each segment
+    its code, length and name and the segment data from offset 39): summaries (100 bytes, key the packed account
+    number) and details (the account number, then the 200-byte segment: key account number and PAUT9CTS)"""
+    d = open(os.path.join(src, APPDIR['COPAUS0C'], 'data/EBCDIC/AWS.M2.CARDDEMO.IMSDATA.DBPAUTP0.dat'), 'rb').read()
+    i, summ, det, acct = 0, [], [], None
+    while i < len(d):
+        n = int.from_bytes(d[i:i + 2], 'big'); r = d[i:i + n]; i += n
+        if r[10:18] == 'PAUTSUM0'.encode('cp037') and n == 140:
+            acct = r[39:45]; summ.append(r[39:139])
+        elif r[10:18] == 'PAUTDTL1'.encode('cp037') and n == 240:
+            det.append(acct + r[39:239])
+    return sorted(summ), sorted(det)
+
+
+def job_paut(src):
+    """PAUTSUM and PAUTDTL from the IMS unload (binary: in hexadecimal on the cards, CDUNHEX makes the 206-byte
+    records, IEBGENER cuts the summaries to 100), and AUTHFRDS, the fraud reports, with one record that no
+    authorization has (an empty KSDS cannot be opened for update)"""
+    summ, det = paut_records(src)
+    jobs = []
+    for name, rl, kl, recs in (('PAUTSUM', 100, 6, summ), ('PAUTDTL', 206, 14, det)):
+        cards = []
+        for r in recs:
+            h = r.ljust(206, b'\0').hex().upper().ljust(480, '0')
+            cards += [h[k:k + 80] for k in range(0, 480, 80)]
+        dsn = f'CARDDEMO.{name}.KSDS'
+        j = JOBCARD.format(name='CDL' + name[:5]) + f"""//DEFINE  EXEC PGM=IDCAMS
+//SYSPRINT DD SYSOUT=*
+//SYSIN    DD *
+{define(name, rl, kl, 0, len(recs))}/*
+//UNHEX   EXEC PGM=CDUNHEX
+//STEPLIB  DD DSN=CARDDEMO.LOADLIB,DISP=SHR
+//SYSOUT   DD SYSOUT=*
+//BINOUT   DD DSN=&&BIN,DISP=(NEW,PASS),UNIT=SYSDA,
+//         SPACE=(TRK,(20,10)),
+//         DCB=(RECFM=F,LRECL=206,BLKSIZE=206)
+//HEXIN    DD *
+""" + '\n'.join(cards) + '\n/*\n'
+        if rl < 206:
+            j += f"""//CUT     EXEC PGM=IEBGENER
+//SYSPRINT DD SYSOUT=*
+//SYSUT1   DD DSN=&&BIN,DISP=(OLD,DELETE)
+//SYSUT2   DD DSN=&&RECS,DISP=(NEW,PASS),UNIT=SYSDA,
+//         SPACE=(TRK,(20,10)),
+//         DCB=(RECFM=F,LRECL={rl},BLKSIZE={rl})
+//SYSIN    DD *
+  GENERATE MAXFLDS=1
+  RECORD FIELD=({rl},1,,1)
+/*
+"""
+        j += f"""//LOAD    EXEC PGM=IDCAMS
+//SYSPRINT DD SYSOUT=*
+//IN       DD DSN={'&&RECS' if rl < 206 else '&&BIN'},DISP=(OLD,DELETE)
+//SYSIN    DD *
+ REPRO INFILE(IN) OUTDATASET({dsn})
+/*
+"""
+        jobs.append((j, f'NUMBER OF RECORDS PROCESSED WAS {len(recs)}'))
+    rl = dlivsam.FRDS_LEN
+    rec = ('9' * 16 + '9999-12-31-23.59.59.999999').ljust(rl)
+    n = (rl + 79) // 80
+    j = JOBCARD.format(name='CDLAUTHF') + f"""//DEFINE  EXEC PGM=IDCAMS
+//SYSPRINT DD SYSOUT=*
+//SYSIN    DD *
+{define('AUTHFRDS', rl, 42, 0, 1)}/*
+""" + stack_steps(rl, n, card_deck([rec], n)) + """//LOAD    EXEC PGM=IDCAMS
+//SYSPRINT DD SYSOUT=*
+//IN       DD DSN=&&RECS,DISP=(OLD,DELETE)
+//SYSIN    DD *
+ REPRO INFILE(IN) OUTDATASET(CARDDEMO.AUTHFRDS.KSDS)
+/*
+"""
+    jobs.append((j, 'NUMBER OF RECORDS PROCESSED WAS 1'))
     return jobs
 
 
@@ -653,6 +741,7 @@ def main():
         for m in online: jobs.append((job_online('P' + m[:7], [m]), None))
     if 'batch' in stages:
         jobs.append((job_cobol('CDBATCH', batch + TOOLS, 'LOADLIB'), None))
+    if 'data' in stages: jobs += job_paut(src)     # after the batch stage: CDUNHEX loads them
     ex = os.path.join(work, 'x')
     if 'tables' in stages or 'clist' in stages or 'rakf' in stages:
         for dsn in ('KICKS.KICKSSYS.V1R5M0.INSTLIB', 'KICKS.KICKSSYS.V1R5M0.CLIST'):
@@ -662,7 +751,7 @@ def main():
         il = os.path.join(ex, 'KICKS.KICKSSYS.V1R5M0.INSTLIB')
         ppt = [f'         KIKPPT TYPE=ENTRY,PROGRAM={p},PGMLANG=CMDLVL' for p in [x for x, _ in ONLINE] + [p for _, p in OTHER_TRANS]]
         ppt += [f'         KIKPPT TYPE=ENTRY,PROGRAM={m},USAGE=MAP' for m in maps_for([x for x, _ in ONLINE], src)]
-        pct = [f'         KIKPCT TYPE=ENTRY,TRANSID={t},PROGRAM={p}' for p, t in ONLINE] + \
+        pct = [f'         KIKPCT TYPE=ENTRY,TRANSID={t},PROGRAM={p}' for p, t in ONLINE if t] + \
               [f'         KIKPCT TYPE=ENTRY,TRANSID={t},PROGRAM={p}' for t, p in OTHER_TRANS]
         fct = []
         for f, _, base in KFILES:
