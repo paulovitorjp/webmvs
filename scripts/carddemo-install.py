@@ -19,7 +19,7 @@ the KICKS COBOL preprocessor. One native Hercules session, ended by the MVS/CE s
   batch    batch programs -> CARDDEMO.LOADLIB (compiled and linked)
   tables   KICKS PPT/PCT/FCT suffix CD -> CARDDEMO.SKIKLOAD
   clist    SYS1.CMDPROC(CARDDEMO): KICKS with the CardDemo files and tables, first transaction CC00
-  rakf     SYS1.SECURE.CNTL(PROFILES): CARDDEMO.* and UCCARDD0 UPDATE
+  rakf     SYS1.SECURE.CNTL(PROFILES): CARDDEMO.* ALTER, UCCARDD0 UPDATE
 """
 import argparse, importlib.util, os, re, shutil, subprocess, sys
 
@@ -50,14 +50,29 @@ FILES = [
 KFILES = [('ACCTDAT', 'CARDDEMO.ACCTDATA.KSDS', None), ('CARDDAT', 'CARDDEMO.CARDDATA.KSDS', None),
           ('CARDAIX', 'CARDDEMO.CARDDATA.PATH', 'CARDDAT'), ('CCXREF', 'CARDDEMO.CARDXREF.KSDS', None),
           ('CXACAIX', 'CARDDEMO.CARDXREF.PATH', 'CCXREF'), ('CUSTDAT', 'CARDDEMO.CUSTDATA.KSDS', None),
-          ('TRANSACT', 'CARDDEMO.TRANSACT.KSDS', None), ('USRSEC', 'CARDDEMO.USRSEC.KSDS', None)]
+          ('TRANSACT', 'CARDDEMO.TRANSACT.KSDS', None), ('USRSEC', 'CARDDEMO.USRSEC.KSDS', None),
+          ('TRANTYPE', 'CARDDEMO.TRANTYPE.KSDS', None), ('TRANCATG', 'CARDDEMO.TRANCATG.KSDS', None)]
 # online programs and their transactions (CardDemo CSD); MAPS: mapsets
 ONLINE = [('COSGN00C', 'CC00'), ('COMEN01C', 'CM00'), ('COADM01C', 'CA00'), ('COACTVWC', 'CAVW'),
           ('COCRDLIC', 'CCLI'), ('COCRDSLC', 'CCDL'), ('COUSR00C', 'CU00'), ('COTRN00C', 'CT00'), ('COTRN01C', 'CT01'),
           ('COUSR01C', 'CU01'), ('COUSR02C', 'CU02'), ('COUSR03C', 'CU03'), ('COTRN02C', 'CT02'), ('COBIL00C', 'CB00'),
-          ('COACTUPC', 'CAUP'), ('COCRDUPC', 'CCUP')]
-OTHER_TRANS = [('CR00', 'CORPT00C')]
-BATCH = ['CBACT02C', 'CBACT03C', 'CBCUS01C']
+          ('COACTUPC', 'CAUP'), ('COCRDUPC', 'CCUP'), ('CORPT00C', 'CR00'), ('COTRTLIC', 'CTLI'), ('COTRTUPC', 'CTTU')]
+# programs outside app/cbl: their directory (cbl, cpy, bms, cpy-bms under it); the transaction type programs use
+# Db2 upstream, here the TRANTYPE file (carddemo/sqlvsam.py)
+APPDIR = {'COTRTLIC': 'app/app-transaction-type-db2', 'COTRTUPC': 'app/app-transaction-type-db2'}
+APPDIRS = ['app'] + sorted(set(APPDIR.values()))
+
+
+def app_file(src, kind, name):
+    """the source of a program (kind cbl) or mapset (bms) in app/ or the directory of an optional part"""
+    for d in APPDIRS:
+        f = os.path.join(src, d, kind, name + '.' + kind)
+        if os.path.exists(f): return f
+    return os.path.join(src, 'app', kind, name + '.' + kind)
+OTHER_TRANS = []
+BATCH = ['CBACT02C', 'CBACT03C', 'CBCUS01C', 'CBTRN03C']
+# batch programs of this port (scripts/carddemo/helpers): CDTRFLT selects transactions by date for the report job
+TOOLS = ['CDTRFLT']
 READALL = """//READALL  JOB (1),'CARDDEMO',CLASS=A,MSGCLASS=A,MSGLEVEL=(1,1)
 //* CardDemo batch readers: list the card, card xref and customer files
 //ACCT    EXEC PGM=CBACT02C
@@ -73,7 +88,7 @@ READALL = """//READALL  JOB (1),'CARDDEMO',CLASS=A,MSGCLASS=A,MSGLEVEL=(1,1)
 //CUSTFILE DD DSN=CARDDEMO.CUSTDATA.KSDS,DISP=SHR
 //SYSOUT   DD SYSOUT=*
 """
-HELPERS = ['CDMOVC', 'CDSTRG', 'CDDATE', 'CDREPC', 'CDNUMV', 'CSUTLDTC', 'CDTLEN', 'CDIDAT', 'CDCLAS']
+HELPERS = ['CDMOVC', 'CDSTRG', 'CDDATE', 'CDREPC', 'CDNUMV', 'CSUTLDTC', 'CDTLEN', 'CDIDAT', 'CDCLAS', 'CDLIKE']
 
 
 def run_job(h, jcl, outdir, timeout=900, expect=None, maxcc=4):
@@ -166,9 +181,9 @@ def fix_bms(lines):
 def maps_for(programs, src):
     m = []
     for p in programs:
-        t = open(os.path.join(src, 'app/cbl', p + '.cbl'), errors='replace').read()
+        t = open(app_file(src, 'cbl', p), errors='replace').read()
         for c in re.findall(r"MAPSET\s*\(\s*'([A-Z0-9]+)'", t) + re.findall(r"VALUE\s+'(CO[A-Z0-9]+) *'\s*\.", t):
-            if os.path.exists(os.path.join(src, 'app/bms', c + '.bms')) and c not in m: m.append(c)
+            if os.path.exists(app_file(src, 'bms', c)) and c not in m: m.append(c)
     return m
 
 
@@ -342,6 +357,8 @@ def job_data(src):
     for name, rl, kl, ko, f, aix in FILES:
         dsn = f'CARDDEMO.{name}.KSDS'
         recs = data_lines(src, f, rl)
+        if name == 'TRANSACT':   # posted transactions: processing time = origin time (the sample has it blank)
+            recs = [r[:304] + r[278:304] + r[330:] if not r[304:330].strip() else r for r in recs]
         n = (rl + 79) // 80
         ctl = f""" DELETE {dsn} CLUSTER
  SET MAXCC = 0
@@ -599,10 +616,10 @@ def main():
     # conversion (host side)
     conv = os.path.join(work, 'conv'); os.makedirs(conv, exist_ok=True)
     cobol, failed = {}, []
-    cob2ans.MAPDIRS[:] = [os.path.join(src, 'app/cpy-bms')]
+    cob2ans.MAPDIRS[:] = [os.path.join(src, d, 'cpy-bms') for d in APPDIRS]
     for p in online + batch:
         try:
-            lines, g = cob2ans.convert(os.path.join(src, 'app/cbl', p + '.cbl'), [os.path.join(src, 'app/cpy')],
+            lines, g = cob2ans.convert(app_file(src, 'cbl', p), [os.path.join(src, d, 'cpy') for d in APPDIRS],
                                        fixes=fixes.FIXES.get(p))
             cobol[p] = lines
             open(os.path.join(conv, p + '.cbl'), 'w').write('\n'.join(lines) + '\n')
@@ -610,11 +627,11 @@ def main():
             failed.append((p, str(e))); print(f'convert {p}: {e}', flush=True)
     if failed and not a.keep_going: raise SystemExit('conversion failed')
     online = [p for p in online if p in cobol]; batch = [p for p in batch if p in cobol]
-    helpers = {h: open(os.path.join(HERE, 'carddemo/helpers', h + '.cbl')).read().splitlines() for h in HELPERS}
+    helpers = {h: open(os.path.join(HERE, 'carddemo/helpers', h + '.cbl')).read().splitlines() for h in HELPERS + TOOLS}
     mapsets = maps_for(online, src)
     bms = {}
     for m in mapsets:
-        lines = open(os.path.join(src, 'app/bms', m + '.bms'), encoding='latin-1').read().splitlines()
+        lines = open(app_file(src, 'bms', m), encoding='latin-1').read().splitlines()
         bms[m] = fix_bms([l.rstrip().replace('&&SYSPARM', '&SYSPARM')[:80] for l in lines])
     print(f'online {online}\nbatch {batch}\nmaps {mapsets}', flush=True)
 
@@ -625,7 +642,7 @@ def main():
         nw = True
         jobs.append((iebupdte('CDSRC1', 'CARDDEMO.COBOL', {**cobol, **helpers}, nw), None))
         jobs.append((iebupdte('CDSRC2', 'CARDDEMO.BMS', bms, nw), None))
-        orig = {p: [l.rstrip()[:80] for l in open(os.path.join(src, 'app/cbl', p + '.cbl'), encoding='latin-1').read().splitlines()]
+        orig = {p: [l.rstrip()[:80] for l in open(app_file(src, 'cbl', p), encoding='latin-1').read().splitlines()]
                 for p in online + batch}
         jobs.append((iebupdte('CDSRC3', 'CARDDEMO.ORIGCBL', orig, nw), None))
     if 'data' in stages: jobs += job_data(src)
@@ -634,8 +651,8 @@ def main():
         for m in mapsets: jobs.append((job_maps('M' + m, [m]), None))
     if 'online' in stages:
         for m in online: jobs.append((job_online('P' + m[:7], [m]), None))
-    if 'batch' in stages and batch:
-        jobs.append((job_cobol('CDBATCH', batch, 'LOADLIB'), None))
+    if 'batch' in stages:
+        jobs.append((job_cobol('CDBATCH', batch + TOOLS, 'LOADLIB'), None))
     ex = os.path.join(work, 'x')
     if 'tables' in stages or 'clist' in stages or 'rakf' in stages:
         for dsn in ('KICKS.KICKSSYS.V1R5M0.INSTLIB', 'KICKS.KICKSSYS.V1R5M0.CLIST'):
@@ -660,6 +677,11 @@ def main():
         jobs.append((gener('CDJCL', 'CARDDEMO.JCL(READALL)', READALL.splitlines()), None))
     if 'rakf' in stages:
         prof = ki.rakf_add(ki.member(os.path.join(ex, 'SECURE'), 'PROFILES'), ['CARDDEMO.*', 'UCCARDD0'])
+        # ALTER: the transaction report job, which KICKS submits without a user (RAKF's default PROD account),
+        # defines and deletes its work files and the report (with CARDDEMO.* UPDATE, a CARDDEMO.TRANREPT* ALTER
+        # profile did not give that account ALTER: RAKF0005)
+        prof = [l.replace('UPDATE', 'ALTER ') if l.split()[:2] == ['DATASET', 'CARDDEMO.*'] else l
+                for l in prof if not (l.split()[:2] and l.split()[1].startswith('CARDDEMO.TRANREPT'))]
         jobs.append((ki.iebupdte('RAKFCARD', 'SYS1.SECURE.CNTL', 'PROFILES', prof), None))
     open(os.path.join(work, 'jobs.jcl'), 'w').write('\n'.join(j for j, _ in jobs))
     for j, _ in jobs:

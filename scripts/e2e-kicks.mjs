@@ -14,7 +14,8 @@
 //                      shows the update notice
 //   --carddemo   after KICKS: CARDDEMO, sign on USER0001, account 00000000001 (Immanuel Kessler), a menu option
 //                that is not included ('not available'), bill payment of account 00000000001, PF3 to the sign-on
-//                screen, PF3, KSSF; then ADMIN001 adds user A0WEBMVS and the user list shows it;
+//                screen, PF3, KSSF; a card update, a transaction report (REVIEW shows it at READY); then ADMIN001
+//                adds user A0WEBMVS and the user list shows it, adds transaction type 50 and deletes it in the list;
 //                --carddemo-only: the same without the KICKS samples
 //   --mobile     iPhone-sized viewport with touch (layout sanity: no horizontal overflow, terminal visible)
 // Output: <out>/kicks-<tag>.json, screenshots <out>/<tag>-<step>.png
@@ -288,8 +289,34 @@ try {
     await shot('carddemo-card-view-updated');
     await key('F3');
     t = await waitText(/Main Menu/, 30000, 'main menu after card view');
+    // transaction report: a custom date range, Y submits the report job (TRNRPT00 writes CARDDEMO.TRANREPT)
+    await typeLine('9');
+    t = await waitText(/Transaction Reports/, 30000, 'report screen');
+    await unlocked(); await page.keyboard.press('Tab'); await page.keyboard.press('Tab');
+    await page.keyboard.type('X0101202212312022Y', { delay: 20 }); await page.keyboard.press('Enter');
+    t = await waitText(/report submitted for printing/, 30000, 'report submitted');
+    check('CardDemo: transaction report submitted', true, t.split('\n').filter((l) => /submitted/.test(l)).map((l) => l.trim()));
+    await shot('carddemo-report-submitted');
+    await key('F3');
+    t = await waitText(/Main Menu/, 30000, 'main menu after the report');
     await leave();
     step('CardDemo user: back at READY');
+    // the report at READY: REVIEW shows CARDDEMO.TRANREPT once the job has written it
+    for (let i = 0; ; i++) {
+      await key('Escape'); await typeLine("review 'carddemo.tranrept'");
+      await sleep(3000); t = await text();
+      if (/Daily Transaction Report/.test(t)) break;
+      if (i > 20) { console.log(t); throw new Error('no report in CARDDEMO.TRANREPT'); }
+      if (!/READY\s*$/m.test(t)) { await key('F3'); }
+      await ready(60000); await sleep(5000);
+    }
+    // the report is 133 columns wide: the date range is right of the 80 REVIEW shows; the detail lines start with
+    // the 16-digit transaction id
+    const rptLines = t.split('\n').filter((l) => /^\s*\d{16}\s/.test(l));
+    check('CardDemo: the report shows in REVIEW (header and transactions)', /DALYREPT/.test(t) && rptLines.length > 0,
+      [t.split('\n').find((l) => /DALYREPT/.test(l)), ...rptLines.slice(0, 2)].map((l) => (l || '').trim()));
+    await shot('carddemo-report');
+    await key('F3'); await ready(60000);
     await signon();
     await sleep(1500); await key('Home'); await page.keyboard.type('ADMIN001PASSWORD', { delay: 20 }); await page.keyboard.press('Enter');
     t = await waitText(/Admin Menu/i, 60000, 'CardDemo admin menu');
@@ -311,6 +338,37 @@ try {
     t = await waitText(/USER0001/, 60000, 'user list');
     check('CardDemo: admin user list shows the new user A0WEBMVS', /A0WEBMVS/.test(t), t.split('\n').filter((l) => /A0WEBMVS|USER0001/.test(l)).map((l) => l.trim()));
     await shot('carddemo-user-list');
+    // transaction types (a VSAM file here): add type 50 (unless a run before added it), then the list deletes it
+    await key('F3');
+    t = await waitText(/Admin Menu/i, 30000, 'admin menu after the user list');
+    await typeLine('6');
+    t = await waitText(/Enter transaction type to be maintained/, 30000, 'transaction type maintenance');
+    await unlocked(); await page.keyboard.type('50', { delay: 20 }); await page.keyboard.press('Enter');
+    t = await waitText(/Press F05 to add|Update transaction type details/, 30000, 'type 50 looked up');
+    if (/Press F05 to add/.test(t)) {
+      await key('F5');
+      t = await waitText(/Enter new transaction type details/, 30000, 'new type');
+      await unlocked(); await page.keyboard.type('Webmvs test type', { delay: 20 }); await page.keyboard.press('Enter');
+      t = await waitText(/Changes validated/, 30000, 'type validated');
+      await key('F5');
+      t = await waitText(/Changes committed to database/, 30000, 'type added');
+      check('CardDemo: admin adds transaction type 50', true, t.split('\n').filter((l) => /50|committed/.test(l)).map((l) => l.trim()));
+      await shot('carddemo-type-added');
+    }
+    await key('F3');
+    t = await waitText(/Admin Menu/i, 30000, 'admin menu after the type maintenance');
+    await typeLine('5');
+    t = await waitText(/Type U to update, D to delete/, 30000, 'transaction type list');
+    check('CardDemo: transaction type list', /01\s+Purchase/.test(t), t.split('\n').filter((l) => /^\s+0[1-7]\s/.test(l)).map((l) => l.trim()));
+    await key('Home'); await page.keyboard.type('50', { delay: 20 }); await page.keyboard.press('Enter');
+    t = await waitText(/50\s+WEBMVS TEST TYPE/, 30000, 'type 50 in the list');
+    check('CardDemo: the list shows the added type 50', true, t.split('\n').filter((l) => /WEBMVS/.test(l)).map((l) => l.trim()));
+    await key('Home'); await key('Tab'); await key('Tab'); await page.keyboard.type('D', { delay: 20 }); await page.keyboard.press('Enter');
+    t = await waitText(/Delete HIGHLIGHTED row/, 30000, 'delete type 50');
+    await key('F10');
+    t = await waitText(/row deleted/, 30000, 'type 50 deleted');
+    check('CardDemo: admin deletes transaction type 50', true, t.split('\n').filter((l) => /deleted/.test(l)).map((l) => l.trim()));
+    await shot('carddemo-type-deleted');
     await leave();
     step('CardDemo admin: back at READY');
   }

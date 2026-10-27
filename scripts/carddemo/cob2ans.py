@@ -457,6 +457,8 @@ class Gen:
         """size of an alphanumeric operand (after fix_expr): a data item, a temp or a literal"""
         if len(toks) == 1 and toks[0] in self.tmpsize: return self.tmpsize[toks[0]]
         if len(toks) == 1 and toks[0][:1] in ('"', "'"): return len(toks[0]) - 2
+        if len(toks) == 1 and re.fullmatch(r'[A-Z0-9-]+ \(.*\)', toks[0]):   # a table element 'X (I)'
+            return self.size_of(toks[0].split(' (')[0], [])
         j, r = self.ref(toks, 0)
         return self.size_of(r['name'], r['quals'])
 
@@ -941,7 +943,7 @@ class Gen:
                     if leaf.name == 'FILLER': continue
                     if leaf.occurs > 1 or any(p.occurs > 1 for p in path):
                         # table: fill each element in a generated loop
-                        out.extend(self.init_table(leaf, path)); continue
+                        out.extend(self.init_table(leaf, path, it)); continue
                     q = ' OF '.join([leaf.name] + [p.name for p in reversed(path)][:1]) if path else leaf.name
                     q = leaf.name + (' OF ' + it.name if leaf is not it else '')
                     out.append(f'MOVE {"ZERO" if leaf.numeric() or leaf.num_edited() or leaf.usage != "DISPLAY" else "SPACES"} TO {q}')
@@ -996,8 +998,17 @@ class Gen:
             return pre + [(verb + ' ' + ' '.join(x)).rstrip()]
         raise CvtError(f'statement {verb} not supported')
 
-    def init_table(self, leaf, path):
-        raise CvtError('INITIALIZE of a group with OCCURS: ' + leaf.name)
+    def init_table(self, leaf, path, it=None):
+        """INITIALIZE of a table: one MOVE per element (small tables only)"""
+        import itertools
+        dims = [p.occurs for p in path if p.occurs > 1] + ([leaf.occurs] if leaf.occurs > 1 else [])
+        n = 1
+        for d in dims: n *= d
+        if n > 64: raise CvtError('INITIALIZE of a table with more than 64 elements: ' + leaf.name)
+        v = 'ZERO' if leaf.numeric() or leaf.num_edited() or leaf.usage != 'DISPLAY' else 'SPACES'
+        q = leaf.name + (' OF ' + it.name if it is not None and leaf is not it else '')
+        return [f'MOVE {v} TO {q} (' + ' '.join(str(i) for i in ix) + ')'
+                for ix in itertools.product(*[range(1, d + 1) for d in dims])]
 
     def inspect(self, args):
         j, r = self.ref(args, 0)
@@ -1027,11 +1038,21 @@ class Gen:
             a, b = rest[1], rest[3]
             return [f'TRANSFORM {tgt} FROM {a} TO {b}']
         if rest[0] == 'TALLYING':
+            # TALLYING c1 FOR [ALL|LEADING] x y ... c2 FOR ...; EXAMINE takes a literal: a one-character constant
+            # item (PIC X VALUE 'D') becomes its value
             cnt = rest[1]; k = 3
             out.append(f'MOVE 0 TO {cnt}')
             while k < len(rest):
+                if k + 1 < len(rest) and rest[k + 1] == 'FOR':
+                    cnt = rest[k]; k += 2; out.append(f'MOVE 0 TO {cnt}'); continue
                 if rest[k] in ('ALL', 'LEADING'): mode = rest[k]; k += 1
-                out.append(f'EXAMINE {tgt} TALLYING {mode} {rest[k]}'); out.append(f'ADD TALLY TO {cnt}'); k += 1
+                x = rest[k]
+                it = self.m.by.get(x, [None])[0] if re.fullmatch(r'[A-Z][A-Z0-9-]*', x) and x not in RESERVED else None
+                if it is not None:
+                    if not (it.value and re.fullmatch(r"'.'", it.value) and it.size() == 1):
+                        raise CvtError('INSPECT TALLYING FOR a data item: ' + x)
+                    x = it.value
+                out.append(f'EXAMINE {tgt} TALLYING {mode} {x}'); out.append(f'ADD TALLY TO {cnt}'); k += 1
             return out
         raise CvtError('INSPECT ' + ' '.join(rest))
 
@@ -1124,6 +1145,8 @@ def convert(path, cpydirs, keep=(), fixes=None):
     if fixes:
         text = '\n'.join(lines)
         for fx in fixes:
+            if callable(fx):    # a function of the whole text (carddemo/sqlvsam.py)
+                text = fx(text); continue
             old, new, want = (fx + (1,))[:3]
             rx = r'\s+'.join(re.escape(w) for w in old.split())
             n = len(re.findall(rx, text))

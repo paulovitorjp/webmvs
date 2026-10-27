@@ -90,12 +90,15 @@ What works (the original programs, converted):
 | main menu | 6 Transaction List | COTRN00C | PF7/PF8 page |
 | main menu | 7 Transaction View | COTRN01C | transaction id (e.g. `0000000000683580`) |
 | main menu | 8 Transaction Add | COTRN02C | account or card number, the transaction fields, `Y` to confirm |
+| main menu | 9 Transaction Reports | CORPT00C | `X` on Monthly, Yearly or Custom (start and end date), `Y` submits the report job |
 | main menu | 10 Bill Payment | COBIL00C | account number, `Y` pays the whole balance (it adds a payment transaction) |
 | admin menu | | COADM01C | |
 | admin menu | 1 User List | COUSR00C | PF7/PF8 page, `U` or `D` on a line updates or deletes that user |
 | admin menu | 2 User Add | COUSR01C | |
 | admin menu | 3 User Update | COUSR02C | user id, Enter, change the fields, PF5 saves |
 | admin menu | 4 User Delete | COUSR03C | user id, Enter, PF5 deletes |
+| admin menu | 5 Transaction Type List/Update | COTRTLIC | filter by type or description; `U` on a line (change the description) or `D`, PF10 saves |
+| admin menu | 6 Transaction Type Maintenance | COTRTUPC | type code, Enter; PF5 adds a new type or saves a change, PF4 deletes |
 
 In the card and transaction lists, `S` on a line shows that card or transaction (`U` in the card list updates it).
 
@@ -104,11 +107,27 @@ The update screens keep the original checks. Some sample records do not pass the
 12546 does not match state NC), so fix those fields too before PF5 saves. KICKS changes what you type to
 capital letters, so names and addresses saved from these screens are stored in capitals.
 
+Transaction reports: option 9 submits the job TRNRPT00, which writes the report to `CARDDEMO.TRANREPT`. After
+CardDemo ends, type `REVIEW 'CARDDEMO.TRANREPT'` at `READY` to read it (PF8 pages, PF3 ends). The sample
+transactions are dated 2022, so use Custom with dates in 2022; a month or year without transactions gives a report
+with totals only. Changes from the original: CICS sends the job to the internal reader through the transient data
+queue JOBS, KICKS through its spool commands (SPOOLOPEN to `INTRDR`); the job has no procedure library or DFSORT,
+so a small program (`CDTRFLT`) keeps the transactions processed between the dates and IDCAMS puts them in card
+number order (through a work file with an alternate index; the OS/360 sort on this system needs 2314 work disks,
+which webmvs does not have) before the original report program CBTRN03C runs. The transaction file has no
+processing date for the sample records, so the install uses their origination date. KICKS submits the job without a
+user, so it runs under RAKF's default batch account; RAKF gives every user ALTER access to `CARDDEMO.*` for the
+job's work files and the report.
+
+Transaction types: the two admin options use Db2 in the original. Here the types are in the VSAM file
+`CARDDEMO.TRANTYPE.KSDS` (the one the batch programs read), and each SQL statement is replaced by KICKS file
+commands (`scripts/carddemo/sqlvsam.py`). As with Db2, a type that has categories (in
+`CARDDEMO.TRANCATG.KSDS`) cannot be deleted; a type you add can. The description filter ignores capitals.
+
 Batch: the file readers CBACT02C, CBACT03C and CBCUS01C are in `CARDDEMO.LOADLIB`; the job
 `CARDDEMO.JCL(READALL)` runs them (`SUBMIT 'CARDDEMO.JCL(READALL)'` at `READY`).
 
-Not in this version: reports, pending authorizations
-(IMS, MQ), transaction type maintenance (Db2) and the other batch jobs (they need SORT,
+Not in this version: pending authorizations (IMS, MQ) and the other batch jobs (they need SORT,
 Db2 or language features this COBOL does not have). Their menu options answer
 "... is not available in this version". The data files are read and written by the programs that work; your
 changes stay in your browser like the rest of the system. When a new version of webmvs changes the CardDemo
@@ -268,7 +287,7 @@ Each bundle has `LICENSE`, `NOTICE` and the QPL text in its `source/` folder (an
 | [MVS/CE](https://github.com/MVS-sysgen/sysgen) v3.0.0 (MVS-sysgen project) | see its repository | the DASD volumes are built from its release; the sysgen automates Jay Moseley's procedures |
 | [Jay Moseley's MVS 3.8J sysgen](https://www.jaymoseley.com/hercules/) | | the basis of MVS/CE |
 | [KICKS for TSO](http://www.kicksfortso.com/) 1.5.0 (Mike Noel) | KICKS license (`kicks-license.txt`; free use, redistribution of the complete package only) | installed on the KICKS0 volume by `scripts/build.sh kicks`; the site offers the unmodified zip in `/kicks/` |
-| [CardDemo](https://github.com/aws-samples/aws-mainframe-modernization-carddemo) (Copyright Amazon.com, Inc. or its affiliates) | Apache-2.0 | modified (converted to ANS COBOL for KICKS) and installed on the CARDD0 volume by `scripts/build.sh carddemo` |
+| [CardDemo](https://github.com/aws-samples/aws-mainframe-modernization-carddemo) (Copyright Amazon.com, Inc. or its affiliates) | Apache-2.0 | modified (converted to ANS COBOL for KICKS, the Db2 programs on VSAM, the report job without DFSORT) and installed on the CARDD0 volume by `scripts/build.sh carddemo` |
 | IND$FILE 2.0.5 (Mike Rayborn) | free, use at your own risk (its README); distributed with MVS/CE's package manager | installed in `SYS2.CMDLIB` from the MVS/CE release by `scripts/build.sh indfile` |
 | [athornton/tn3270](https://github.com/athornton/tn3270) (Adam Thornton) | MIT | `web/vendor/tn3270/LICENSE` |
 | 3270 font (x3270 BDF font, Paul Mattes, Jeff Sparkes, GTRC) | BSD-style | `web/vendor/tn3270/packages/canvas/assets/LICENSE-3270-font.txt`; see also [rbanffy/3270font](https://github.com/rbanffy/3270font) |
